@@ -8,15 +8,15 @@ const GHOSTTY_COMMIT: &str = "9f0e1719";
 
 fn main() {
     println!("cargo:rerun-if-changed=shim/ghostty_surface.m");
-    println!("cargo:rerun-if-changed=../../vendor/ghostty/build.zig");
-    println!("cargo:rerun-if-changed=../../vendor/ghostty/build.zig.zon");
+    println!("cargo:rerun-if-changed=vendor/ghostty/build.zig");
+    println!("cargo:rerun-if-changed=vendor/ghostty/build.zig.zon");
 
     if env::var_os("CARGO_CFG_TARGET_OS").as_deref() != Some(std::ffi::OsStr::new("macos")) {
         return;
     }
 
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
-    let source = manifest.join("../../vendor/ghostty");
+    let source = manifest.join("vendor/ghostty");
     let target = cargo_target_dir(&manifest);
     let prefix = target.join(format!("libghostty-{GHOSTTY_COMMIT}"));
     let library = prefix.join("lib/libghostty-internal.a");
@@ -113,6 +113,12 @@ fn cargo_target_dir(manifest: &Path) -> PathBuf {
 }
 
 fn build_ghostty(source: &Path, target: &Path, prefix: &Path) {
+    let build_source = target.join(format!("ghostty-build-source-{GHOSTTY_COMMIT}"));
+    if build_source.exists() {
+        std::fs::remove_dir_all(&build_source).expect("remove stale writable Ghostty source");
+    }
+    copy_tree(source, &build_source);
+
     let developer_dir = command_output("/usr/bin/xcode-select", &["-p"], &["DEVELOPER_DIR"]);
     let sdk_root = command_output(
         "/usr/bin/xcrun",
@@ -128,7 +134,7 @@ fn build_ghostty(source: &Path, target: &Path, prefix: &Path) {
     );
     let package_cache = target.join("ghostty-zig-pkg");
     std::fs::create_dir_all(&package_cache).expect("create shared Ghostty package cache");
-    let source_package_cache = source.join("zig-pkg");
+    let source_package_cache = build_source.join("zig-pkg");
     let linked_package_cache = std::fs::symlink_metadata(&source_package_cache).is_err();
     if linked_package_cache {
         #[cfg(unix)]
@@ -137,7 +143,7 @@ fn build_ghostty(source: &Path, target: &Path, prefix: &Path) {
     }
 
     let status = Command::new(zig)
-        .current_dir(source)
+        .current_dir(&build_source)
         .env_remove("NIX_CFLAGS_COMPILE")
         .env_remove("NIX_LDFLAGS")
         .env_remove("NIX_CC")
@@ -172,6 +178,27 @@ fn build_ghostty(source: &Path, target: &Path, prefix: &Path) {
             .expect("remove temporary Ghostty package cache link");
     }
     assert!(status.success(), "libghostty Zig build failed");
+    std::fs::remove_dir_all(build_source).expect("remove writable Ghostty build source");
+}
+
+fn copy_tree(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).expect("create writable Ghostty source directory");
+    for entry in std::fs::read_dir(source).expect("read vendored Ghostty source") {
+        let entry = entry.expect("read vendored Ghostty source entry");
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().expect("read Ghostty source entry type");
+        if file_type.is_dir() {
+            copy_tree(&source_path, &destination_path);
+        } else if file_type.is_file() {
+            std::fs::copy(&source_path, &destination_path).expect("copy Ghostty source file");
+        } else {
+            panic!(
+                "unsupported entry in vendored Ghostty source: {}",
+                source_path.display()
+            );
+        }
+    }
 }
 
 fn command_output(program: &str, args: &[&str], removed: &[&str]) -> String {

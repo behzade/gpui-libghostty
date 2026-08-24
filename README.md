@@ -13,7 +13,8 @@ The native renderer currently supports macOS. Ghostty's embedded platform API
 exposes macOS and iOS native views; Linux uses Ghostty's GTK application runtime
 and needs a separate GTK/OpenGL host adapter. Ghostty is pinned to commit
 `9f0e1719dc918368367d368bfe300f59bb68b5a4`; the required, pruned source closure
-is under `vendor/ghostty`.
+is under `crates/gpui-ghostty/vendor/ghostty` so Cargo and Crane include it
+with the package.
 
 ## Requirements
 
@@ -64,4 +65,5 @@ so entity and event types remain identical.
 ## License
 
 The workspace is MIT-licensed. Vendored Ghostty remains MIT-licensed; see
-`vendor/ghostty/LICENSE` and `vendor/ghostty/VENDOR.md`.
+`crates/gpui-ghostty/vendor/ghostty/LICENSE` and
+`crates/gpui-ghostty/vendor/ghostty/VENDOR.md`.
