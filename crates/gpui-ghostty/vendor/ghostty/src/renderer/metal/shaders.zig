@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const build_options = @import("build_options");
 const macos = @import("macos");
 const objc = @import("objc");
 const math = @import("../../math.zig");
@@ -328,23 +329,33 @@ pub const BgImage = extern struct {
 /// Initialize the MTLLibrary. A MTLLibrary is a collection of shaders.
 fn initLibrary(device: objc.Object) !objc.Object {
     const start: std.Io.Timestamp = .now(global.io(), .awake);
-
-    const data = try macos.dispatch.Data.create(
-        @embedFile("ghostty_metallib"),
-        macos.dispatch.queue.getMain(),
-        macos.dispatch.Data.DESTRUCTOR_DEFAULT,
-    );
-    defer data.release();
-
     var err: ?*anyopaque = null;
-    const library = device.msgSend(
-        objc.Object,
-        objc.sel("newLibraryWithData:error:"),
-        .{
-            data,
-            &err,
-        },
-    );
+
+    const library = if (build_options.app_runtime == .none) library: {
+        const source = try macos.foundation.String.createWithBytes(
+            @embedFile("ghostty_metallib"),
+            .utf8,
+            false,
+        );
+        defer source.release();
+        break :library device.msgSend(
+            objc.Object,
+            objc.sel("newLibraryWithSource:options:error:"),
+            .{ source, @as(?*anyopaque, null), &err },
+        );
+    } else library: {
+        const data = try macos.dispatch.Data.create(
+            @embedFile("ghostty_metallib"),
+            macos.dispatch.queue.getMain(),
+            macos.dispatch.Data.DESTRUCTOR_DEFAULT,
+        );
+        defer data.release();
+        break :library device.msgSend(
+            objc.Object,
+            objc.sel("newLibraryWithData:error:"),
+            .{ data, &err },
+        );
+    };
     try checkError(err);
 
     log.debug("shader library loaded time={}us", .{start.untilNow(global.io(), .awake).toMicroseconds()});

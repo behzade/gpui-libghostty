@@ -136,7 +136,8 @@ impl Terminal {
     }
 
     fn send_key(&mut self, action: KeyAction, keystroke: &gpui::Keystroke) {
-        let Some(keycode) = mac_keycode(&keystroke.key) else {
+        let (key, implied_shift) = unshifted_macos_key(&keystroke.key);
+        let Some(keycode) = mac_keycode(key) else {
             if matches!(action, KeyAction::Press | KeyAction::Repeat)
                 && !keystroke.modifiers.control
                 && !keystroke.modifiers.alt
@@ -152,10 +153,12 @@ impl Terminal {
             .key_char
             .as_deref()
             .and_then(|text| CString::new(text).ok());
-        let unshifted = keystroke.key.chars().next().map_or(0, u32::from);
+        let unshifted = key.chars().next().map_or(0, u32::from);
+        let mut key_modifiers = keystroke.modifiers;
+        key_modifiers.shift |= implied_shift;
         let _ = self.surface.key(
             action,
-            modifiers(keystroke.modifiers),
+            modifiers(key_modifiers),
             keycode,
             text.as_deref(),
             unshifted,
@@ -297,6 +300,33 @@ fn modifiers(value: gpui::Modifiers) -> Modifiers {
     result
 }
 
+fn unshifted_macos_key(key: &str) -> (&str, bool) {
+    match key {
+        "!" => ("1", true),
+        "@" => ("2", true),
+        "#" => ("3", true),
+        "$" => ("4", true),
+        "%" => ("5", true),
+        "^" => ("6", true),
+        "&" => ("7", true),
+        "*" => ("8", true),
+        "(" => ("9", true),
+        ")" => ("0", true),
+        "_" => ("-", true),
+        "+" => ("=", true),
+        "{" => ("[", true),
+        "}" => ("]", true),
+        "|" => ("\\", true),
+        ":" => (";", true),
+        "\"" => ("'", true),
+        "<" => (",", true),
+        ">" => (".", true),
+        "?" => ("/", true),
+        "~" => ("`", true),
+        _ => (key, false),
+    }
+}
+
 fn mac_keycode(key: &str) -> Option<u32> {
     Some(match key {
         "a" => 0,
@@ -391,6 +421,26 @@ mod tests {
     fn keycode_mapping_covers_terminal_navigation_and_repeat_keys() {
         for key in ["j", "k", "up", "down", "pageup", "pagedown", "escape"] {
             assert!(mac_keycode(key).is_some(), "missing keycode for {key}");
+        }
+    }
+
+    #[test]
+    fn shifted_punctuation_uses_a_physical_key_event() {
+        for (shifted, unshifted) in [
+            ("!", "1"),
+            ("*", "8"),
+            ("+", "="),
+            ("{", "["),
+            ("|", "\\"),
+            (":", ";"),
+            ("\"", "'"),
+            ("?", "/"),
+            ("~", "`"),
+        ] {
+            let (key, implied_shift) = unshifted_macos_key(shifted);
+            assert_eq!(key, unshifted);
+            assert!(implied_shift);
+            assert!(mac_keycode(key).is_some());
         }
     }
 }
