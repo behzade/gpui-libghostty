@@ -154,11 +154,12 @@ impl Terminal {
             .as_deref()
             .and_then(|text| CString::new(text).ok());
         let unshifted = key.chars().next().map_or(0, u32::from);
-        let mut key_modifiers = keystroke.modifiers;
-        key_modifiers.shift |= implied_shift;
+        let (active_modifiers, consumed_modifiers) =
+            key_modifiers(keystroke.modifiers, implied_shift, text.is_some());
         let _ = self.surface.key(
             action,
-            modifiers(key_modifiers),
+            active_modifiers,
+            consumed_modifiers,
             keycode,
             text.as_deref(),
             unshifted,
@@ -300,6 +301,20 @@ fn modifiers(value: gpui::Modifiers) -> Modifiers {
     result
 }
 
+fn key_modifiers(
+    mut value: gpui::Modifiers,
+    implied_shift: bool,
+    has_text: bool,
+) -> (Modifiers, Modifiers) {
+    value.shift |= implied_shift;
+    let active = modifiers(value);
+    let mut consumed = Modifiers::empty();
+    if has_text && value.shift {
+        consumed.insert(Modifiers::SHIFT);
+    }
+    (active, consumed)
+}
+
 fn unshifted_macos_key(key: &str) -> (&str, bool) {
     match key {
         "!" => ("1", true),
@@ -438,9 +453,12 @@ mod tests {
             ("~", "`"),
         ] {
             let (key, implied_shift) = unshifted_macos_key(shifted);
+            let (active, consumed) = key_modifiers(gpui::Modifiers::default(), implied_shift, true);
             assert_eq!(key, unshifted);
             assert!(implied_shift);
             assert!(mac_keycode(key).is_some());
+            assert_eq!(active, Modifiers::SHIFT);
+            assert_eq!(consumed, Modifiers::SHIFT);
         }
     }
 }

@@ -44,6 +44,7 @@ mod platform {
             surface: *mut RawSurface,
             action: c_int,
             modifiers: c_int,
+            consumed_modifiers: c_int,
             keycode: u32,
             text: *const c_char,
             unshifted_codepoint: u32,
@@ -134,6 +135,7 @@ mod platform {
             &mut self,
             action: KeyAction,
             modifiers: Modifiers,
+            consumed_modifiers: Modifiers,
             keycode: u32,
             text: Option<&CStr>,
             unshifted_codepoint: u32,
@@ -145,6 +147,7 @@ mod platform {
                     self.raw.as_ptr(),
                     action as c_int,
                     modifiers.bits(),
+                    consumed_modifiers.bits(),
                     keycode,
                     text.map_or(std::ptr::null(), CStr::as_ptr),
                     unshifted_codepoint,
@@ -230,6 +233,7 @@ impl NativeSurface {
         &mut self,
         _action: KeyAction,
         _modifiers: Modifiers,
+        _consumed_modifiers: Modifiers,
         _keycode: u32,
         _text: Option<&CStr>,
         _unshifted_codepoint: u32,
@@ -256,7 +260,7 @@ pub enum KeyAction {
     Repeat = 2,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Modifiers(i32);
 
 impl Modifiers {

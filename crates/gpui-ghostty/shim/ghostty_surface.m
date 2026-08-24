@@ -222,6 +222,7 @@ bool gpui_ghostty_surface_key(
     gpui_ghostty_surface *state,
     int action,
     int modifiers,
+    int consumed_modifiers,
     uint32_t keycode,
     const char *text,
     uint32_t unshifted_codepoint
@@ -230,7 +231,7 @@ bool gpui_ghostty_surface_key(
     ghostty_input_key_s event = {
         .action = (ghostty_input_action_e)action,
         .mods = (ghostty_input_mods_e)modifiers,
-        .consumed_mods = GHOSTTY_MODS_NONE,
+        .consumed_mods = (ghostty_input_mods_e)consumed_modifiers,
         .keycode = keycode,
         .text = text,
         .unshifted_codepoint = unshifted_codepoint,
