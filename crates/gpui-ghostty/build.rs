@@ -114,7 +114,7 @@ fn cargo_build_dir(manifest: &Path) -> PathBuf {
         return target;
     }
 
-    PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory")).join("native")
+    env::temp_dir().join(format!("gpui-ghostty-native-{}", std::process::id()))
 }
 
 fn directory_is_writable(path: &Path) -> bool {
