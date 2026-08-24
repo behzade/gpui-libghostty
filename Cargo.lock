@@ -1365,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-libghostty"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "gpui",
  "raw-window-handle",

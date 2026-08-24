@@ -10,6 +10,7 @@ fn main() {
     println!("cargo:rerun-if-changed=shim/ghostty_surface.m");
     println!("cargo:rerun-if-changed=vendor/ghostty/build.zig");
     println!("cargo:rerun-if-changed=vendor/ghostty/build.zig.zon");
+    println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_PACKAGE_CACHE_DIR");
 
     if env::var_os("CARGO_CFG_TARGET_OS").as_deref() != Some(std::ffi::OsStr::new("macos")) {
         return;
@@ -126,7 +127,7 @@ fn build_ghostty(source: &Path, target: &Path, prefix: &Path) {
         toolchain.display(),
         env::var("PATH").unwrap_or_default()
     );
-    let package_cache = target.join("ghostty-zig-pkg");
+    let package_cache = package_cache_dir(target);
     std::fs::create_dir_all(&package_cache).expect("create shared Ghostty package cache");
     let source_package_cache = build_source.join("zig-pkg");
     let linked_package_cache = std::fs::symlink_metadata(&source_package_cache).is_err();
@@ -173,6 +174,34 @@ fn build_ghostty(source: &Path, target: &Path, prefix: &Path) {
     }
     assert!(status.success(), "libghostty Zig build failed");
     std::fs::remove_dir_all(build_source).expect("remove writable Ghostty build source");
+}
+
+fn package_cache_dir(native_target: &Path) -> PathBuf {
+    if let Some(path) = env::var_os("GHOSTTY_ZIG_PACKAGE_CACHE_DIR").map(PathBuf::from) {
+        assert!(
+            path.is_absolute(),
+            "Ghostty Zig package cache must be absolute"
+        );
+        return path;
+    }
+
+    if let Some(path) = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        && !is_nix_store_path(&path)
+    {
+        return path.join("ghostty-zig-pkg");
+    }
+
+    native_target.join("ghostty-zig-pkg")
+}
+
+fn is_nix_store_path(path: &Path) -> bool {
+    path.starts_with(
+        env::var_os("NIX_STORE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/nix/store")),
+    )
 }
 
 fn copy_tree(source: &Path, destination: &Path) {
