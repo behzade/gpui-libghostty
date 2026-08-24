@@ -1,11 +1,12 @@
-# gpui-ghostty
+# gpui-libghostty
 
 Native Ghostty terminal and embedded Neovim components for GPUI.
 
 ## Crates
 
-- `gpui-ghostty` hosts a command in Ghostty's native Metal renderer and forwards
-  GPUI keyboard, key-repeat, mouse, scroll, focus, resize, and visibility events.
+- `gpui-libghostty` hosts a command in Ghostty's native Metal renderer and
+  forwards GPUI keyboard, key-repeat, mouse, scroll, focus, resize, and
+  visibility events.
 - `gpui-neovim` starts Neovim with a private RPC socket and opens later files in
   the same editor instance.
 
@@ -26,6 +27,11 @@ Set `ZIG` to select a non-default Zig executable. Set `GPUI_NVIM` or assign
 `NvimOptions::executable` to select Neovim.
 
 ## Terminal
+
+```toml
+[dependencies]
+gpui-ghostty = { package = "gpui-libghostty", version = "0.1" }
+```
 
 ```rust,ignore
 use gpui_ghostty::{Terminal, TerminalOptions};

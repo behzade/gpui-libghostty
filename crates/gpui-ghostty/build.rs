@@ -17,7 +17,8 @@ fn main() {
 
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let source = manifest.join("vendor/ghostty");
-    let target = cargo_build_dir(&manifest);
+    let target =
+        PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory")).join("native");
     let prefix = target.join(format!("libghostty-{GHOSTTY_COMMIT}"));
     let library = prefix.join("lib/libghostty-internal.a");
 
@@ -103,29 +104,6 @@ fn clean_xcode_command(program: &Path, developer_dir: &str, sdk_root: &str) -> C
         .env("DEVELOPER_DIR", developer_dir)
         .env("SDKROOT", sdk_root);
     command
-}
-
-fn cargo_build_dir(manifest: &Path) -> PathBuf {
-    let target = env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| manifest.join("../../target"));
-    if directory_is_writable(&target) {
-        return target;
-    }
-
-    env::temp_dir().join(format!("gpui-ghostty-native-{}", std::process::id()))
-}
-
-fn directory_is_writable(path: &Path) -> bool {
-    if std::fs::create_dir_all(path).is_err() {
-        return false;
-    }
-    let probe = path.join(format!(".gpui-ghostty-write-test-{}", std::process::id()));
-    if std::fs::write(&probe, []).is_err() {
-        return false;
-    }
-    std::fs::remove_file(probe).is_ok()
 }
 
 fn build_ghostty(source: &Path, target: &Path, prefix: &Path) {

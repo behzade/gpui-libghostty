@@ -1,5 +1,5 @@
 [package]
-name = "gpui-ghostty"
+name = "gpui-libghostty"
 description = "Native libghostty terminal component for GPUI"
 version.workspace = true
 edition.workspace = true
@@ -7,6 +7,12 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 build = "build.rs"
+exclude = [
+    "vendor/ghostty/src/crash/testdata/**",
+    "vendor/ghostty/src/font/res/NotoColorEmoji.ttf",
+    "vendor/ghostty/src/font/res/NotoEmoji-Regular.ttf",
+    "vendor/ghostty/src/terminal/kitty/testdata/**",
+]
 
 [dependencies]
 gpui.workspace = true
