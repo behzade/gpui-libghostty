@@ -1,0 +1,5 @@
+/target
+/vendor/ghostty/zig-pkg
+/vendor/ghostty/.zig-cache
+/vendor/ghostty/zig-out
+.DS_Store
