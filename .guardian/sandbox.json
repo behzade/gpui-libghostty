@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "rights": [
+    {
+      "kind": "filesystem",
+      "access": "read",
+      "path": "~/.cargo/git/checkouts",
+      "scope": "tree"
+    },
+    {
+      "kind": "filesystem",
+      "access": "write",
+      "path": ".git",
+      "scope": "tree"
+    },
+    {
+      "kind": "network_host",
+      "host": "api.github.com"
+    },
+    {
+      "kind": "network_host",
+      "host": "crates.io"
+    },
+    {
+      "kind": "network_host",
+      "host": "github.com"
+    },
+    {
+      "kind": "network_host",
+      "host": "patch-diff.githubusercontent.com"
+    },
+    {
+      "kind": "network_host",
+      "host": "static.crates.io"
+    }
+  ]
+}

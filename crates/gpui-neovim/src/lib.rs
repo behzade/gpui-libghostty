@@ -1,6 +1,7 @@
 //! Embedded Neovim component for GPUI, rendered by [`gpui_ghostty`].
 
 use std::{
+    ffi::OsStr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicU64, Ordering},
@@ -18,6 +19,7 @@ const DEFAULT_REMOTE_TIMEOUT: Duration = Duration::from_secs(1);
 pub struct NvimOptions {
     pub project: PathBuf,
     pub initial_file: PathBuf,
+    pub initial_line: Option<u64>,
     pub executable: PathBuf,
     pub remote_timeout: Duration,
 }
@@ -27,6 +29,7 @@ impl NvimOptions {
         Self {
             project: project.into(),
             initial_file: initial_file.into(),
+            initial_line: None,
             executable: std::env::var_os("GPUI_NVIM")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("nvim")),
@@ -52,7 +55,12 @@ impl NvimEditor {
         cx: &mut Context<T>,
     ) -> Result<Self, String> {
         let socket = socket_path();
-        let command = nvim_command(&options.executable, &socket, &options.initial_file);
+        let command = nvim_command(
+            &options.executable,
+            &socket,
+            &options.initial_file,
+            options.initial_line,
+        );
         let terminal = Terminal::spawn(
             TerminalOptions::new(command, options.project.clone()),
             window,
@@ -92,20 +100,37 @@ impl NvimEditor {
 
     /// Opens `path` in the existing Neovim server rather than spawning another editor.
     pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Result<(), String> {
+        self.open_file_at_line(path, None, cx)
+    }
+
+    /// Opens `path` and places the cursor at `line` when supplied.
+    pub fn open_file_at_line(
+        &mut self,
+        path: PathBuf,
+        line: Option<u64>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
         if !self.terminal.read(cx).is_alive() {
             return Err("the embedded Neovim process has exited".to_owned());
         }
-        let mut remote = Command::new(&self.executable)
-            .current_dir(&self.project)
-            .arg("--server")
-            .arg(&self.socket)
-            .arg("--remote")
-            .arg(&path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| format!("contact embedded Neovim: {error}"))?;
+        self.run_remote("--remote", path.as_os_str())?;
+        if let Some(line) = line {
+            self.run_remote("--remote-expr", format!("cursor({line}, 1)"))?;
+        }
+        self.path = path;
+        Ok(())
+    }
+
+    fn run_remote(&self, operation: &str, argument: impl AsRef<OsStr>) -> Result<(), String> {
+        let mut remote = remote_command(
+            &self.executable,
+            &self.project,
+            &self.socket,
+            operation,
+            argument,
+        )
+        .spawn()
+        .map_err(|error| format!("contact embedded Neovim: {error}"))?;
         let status = remote
             .wait_timeout(self.remote_timeout)
             .map_err(|error| format!("wait for embedded Neovim: {error}"))?;
@@ -120,9 +145,28 @@ impl NvimEditor {
         if !status.success() {
             return Err(format!("Neovim remote command exited with {status}"));
         }
-        self.path = path;
         Ok(())
     }
+}
+
+fn remote_command(
+    executable: &Path,
+    project: &Path,
+    socket: &Path,
+    operation: &str,
+    argument: impl AsRef<OsStr>,
+) -> Command {
+    let mut command = Command::new(executable);
+    command
+        .current_dir(project)
+        .arg("--server")
+        .arg(socket)
+        .arg(operation)
+        .arg(argument)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
 }
 
 impl Render for NvimEditor {
@@ -131,11 +175,13 @@ impl Render for NvimEditor {
     }
 }
 
-fn nvim_command(executable: &Path, socket: &Path, path: &Path) -> String {
+fn nvim_command(executable: &Path, socket: &Path, path: &Path, line: Option<u64>) -> String {
+    let line = line.map_or_else(String::new, |line| format!(" +{line}"));
     format!(
-        "{} --listen {} -- {}",
+        "{} --listen {}{} -- {}",
         shell_quote(executable),
         shell_quote(socket),
+        line,
         shell_quote(path)
     )
 }
@@ -160,8 +206,31 @@ mod tests {
                 Path::new("/tmp/my nvim"),
                 Path::new("/tmp/editor.sock"),
                 Path::new("/tmp/it's.rs"),
+                Some(42),
             ),
-            "'/tmp/my nvim' --listen '/tmp/editor.sock' -- '/tmp/it'\\''s.rs'"
+            "'/tmp/my nvim' --listen '/tmp/editor.sock' +42 -- '/tmp/it'\\''s.rs'"
+        );
+    }
+
+    #[test]
+    fn remote_commands_keep_the_operation_and_argument_separate() {
+        let command = remote_command(
+            Path::new("/tmp/my nvim"),
+            Path::new("/tmp/project"),
+            Path::new("/tmp/editor.sock"),
+            "--remote-expr",
+            "cursor(42, 1)",
+        );
+
+        assert_eq!(command.get_current_dir(), Some(Path::new("/tmp/project")));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                "--server",
+                "/tmp/editor.sock",
+                "--remote-expr",
+                "cursor(42, 1)"
+            ]
         );
     }
 
