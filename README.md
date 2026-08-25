@@ -52,6 +52,10 @@ Set `GHOSTTY_NATIVE_CACHE_DIR`, `GHOSTTY_ZIG_PACKAGE_CACHE_DIR`, or
 native cache key includes the Ghostty source, target, Zig version, SDK, and
 build options, so a changed input gets a new archive.
 
+Set `GHOSTTY_ZIG_SYSTEM_PACKAGE_DIR` to make the build pass that path to
+`zig build --system`. Zig will not download packages in this mode, so the
+directory must contain every package required by the vendored Ghostty source.
+
 ## Terminal
 
 ```toml

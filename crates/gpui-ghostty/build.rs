@@ -8,6 +8,7 @@ use std::{
 
 const NATIVE_CACHE_VERSION: &str = "2";
 const SHARED_CACHE_NAME: &str = "gpui-libghostty";
+const ZIG_SYSTEM_PACKAGE_DIR_ENV: &str = "GHOSTTY_ZIG_SYSTEM_PACKAGE_DIR";
 const GHOSTTY_BUILD_OPTIONS: &[&str] = &[
     "-Dapp-runtime=none",
     "-Demit-xcframework=false",
@@ -27,6 +28,7 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/ghostty");
     println!("cargo:rerun-if-env-changed=GHOSTTY_NATIVE_CACHE_DIR");
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_PACKAGE_CACHE_DIR");
+    println!("cargo:rerun-if-env-changed={ZIG_SYSTEM_PACKAGE_DIR_ENV}");
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_GLOBAL_CACHE_DIR");
     println!("cargo:rerun-if-env-changed=XDG_CACHE_HOME");
     println!("cargo:rerun-if-env-changed=HOME");
@@ -155,12 +157,15 @@ fn build_ghostty_linux(
             .expect("link Ghostty package cache into the shared target directory");
     }
 
-    let status = Command::new(zig)
+    let mut command = Command::new(zig);
+    command
         .current_dir(&build_source)
         .env("ZIG_GLOBAL_CACHE_DIR", zig_global_cache_dir(out_dir))
         .env("ZIG_LOCAL_CACHE_DIR", native_work.join("ghostty-zig-cache"))
         .args(["build", "--prefix"])
-        .arg(&staging_prefix)
+        .arg(&staging_prefix);
+    use_system_package_dir(&mut command);
+    let status = command
         .args(GHOSTTY_BUILD_OPTIONS)
         .arg("-Drenderer=opengl")
         .status();
@@ -361,8 +366,9 @@ fn build_ghostty(
         .env("ZIG_GLOBAL_CACHE_DIR", zig_global_cache_dir(out_dir))
         .env("ZIG_LOCAL_CACHE_DIR", native_work.join("ghostty-zig-cache"))
         .args(["build", "--prefix"])
-        .arg(&staging_prefix)
-        .args(GHOSTTY_BUILD_OPTIONS);
+        .arg(&staging_prefix);
+    use_system_package_dir(&mut command);
+    command.args(GHOSTTY_BUILD_OPTIONS);
     let status = command.status();
 
     if linked_package_cache {
@@ -514,6 +520,16 @@ fn package_cache_dir(out_dir: &Path) -> PathBuf {
         "zig-pkg",
         "ghostty-zig-pkg",
     )
+}
+
+fn use_system_package_dir(command: &mut Command) {
+    if let Some(path) = env::var_os(ZIG_SYSTEM_PACKAGE_DIR_ENV).map(PathBuf::from) {
+        assert!(
+            path.is_absolute(),
+            "{ZIG_SYSTEM_PACKAGE_DIR_ENV} must be an absolute path"
+        );
+        command.arg("--system").arg(path);
+    }
 }
 
 fn zig_global_cache_dir(out_dir: &Path) -> PathBuf {
