@@ -32,9 +32,14 @@ with the package.
 
 ## Requirements
 
+- Rust 1.95
 - macOS and Xcode command-line tools, or Wayland with EGL, libc++, and desktop OpenGL 4.3
 - Zig 0.16
 - Neovim for `gpui-neovim`
+
+The default Nix development shell provides the Rust tools, Zig, Neovim, and
+the required Linux build and runtime libraries. macOS still requires Xcode
+command-line tools because the native build uses `xcrun`.
 
 Set `ZIG` to select a non-default Zig executable. Set `GPUI_NVIM` or assign
 `NvimOptions::executable` to select Neovim.
