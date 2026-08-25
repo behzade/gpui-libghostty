@@ -10,7 +10,7 @@ use gpui::{
     KeyDownEvent, KeyUpEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
     Pixels, Render, ScrollDelta, ScrollWheelEvent, Styled as _, Task, Window, canvas, div,
 };
-use raw_window_handle::RawWindowHandle;
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::native::{KeyAction, Modifiers, MouseButton, MouseState, NativeSurface};
 
@@ -57,9 +57,15 @@ impl Terminal {
             })?;
         let command = CString::new(options.command)
             .map_err(|_| "terminal command contains a NUL byte".to_owned())?;
-        let parent_view = appkit_view(window)?;
-        let surface = NativeSurface::new(parent_view, &working_directory, &command)
-            .map_err(|error| format!("initialize libghostty: {error}"))?;
+        let native_window = native_window(window)?;
+        let surface = NativeSurface::new(
+            native_window.display,
+            native_window.surface,
+            f64::from(window.scale_factor()),
+            &working_directory,
+            &command,
+        )
+        .map_err(|error| format!("initialize libghostty: {error}"))?;
         let focus = cx.focus_handle();
         if options.focus_on_spawn {
             focus.focus(window, cx);
@@ -109,13 +115,14 @@ impl Terminal {
         }));
     }
 
-    fn update_frame(&mut self, bounds: Bounds<Pixels>) {
+    fn update_frame(&mut self, bounds: Bounds<Pixels>, scale_factor: f64) {
         self.bounds = bounds;
         self.surface.set_frame(
             f64::from(f32::from(bounds.origin.x)),
             f64::from(f32::from(bounds.origin.y)),
             f64::from(f32::from(bounds.size.width)),
             f64::from(f32::from(bounds.size.height)),
+            scale_factor,
         );
         self.surface.set_visible(true);
     }
@@ -136,8 +143,7 @@ impl Terminal {
     }
 
     fn send_key(&mut self, action: KeyAction, keystroke: &gpui::Keystroke) {
-        let (key, implied_shift) = unshifted_macos_key(&keystroke.key);
-        let Some(keycode) = mac_keycode(key) else {
+        let Some(key) = mac_key(&keystroke.key) else {
             if matches!(action, KeyAction::Press | KeyAction::Repeat)
                 && !keystroke.modifiers.control
                 && !keystroke.modifiers.alt
@@ -153,16 +159,15 @@ impl Terminal {
             .key_char
             .as_deref()
             .and_then(|text| CString::new(text).ok());
-        let unshifted = key.chars().next().map_or(0, u32::from);
         let (active_modifiers, consumed_modifiers) =
-            key_modifiers(keystroke.modifiers, implied_shift, text.is_some());
+            key_modifiers(keystroke.modifiers, key.implied_shift, text.is_some());
         let _ = self.surface.key(
             action,
             active_modifiers,
             consumed_modifiers,
-            keycode,
+            key.keycode,
             text.as_deref(),
-            unshifted,
+            key.unshifted_codepoint,
         );
     }
 
@@ -217,8 +222,11 @@ impl Render for Terminal {
             .min_h_0()
             .child(
                 canvas(
-                    move |bounds, _, cx| {
-                        let _ = terminal.update(cx, |terminal, _| terminal.update_frame(bounds));
+                    move |bounds, window, cx| {
+                        let scale_factor = f64::from(window.scale_factor());
+                        let _ = terminal.update(cx, |terminal, _| {
+                            terminal.update_frame(bounds, scale_factor);
+                        });
                     },
                     |_, _, _, _| {},
                 )
@@ -275,12 +283,33 @@ impl From<gpui::MouseButton> for MouseButton {
     }
 }
 
-fn appkit_view(window: &Window) -> Result<NonNull<c_void>, String> {
+struct NativeWindow {
+    display: Option<NonNull<c_void>>,
+    surface: NonNull<c_void>,
+}
+
+fn native_window(window: &Window) -> Result<NativeWindow, String> {
     let handle = raw_window_handle::HasWindowHandle::window_handle(window)
         .map_err(|error| format!("read native window handle: {error}"))?;
     match handle.as_raw() {
-        RawWindowHandle::AppKit(handle) => Ok(handle.ns_view),
-        _ => Err("libghostty native surfaces are currently available only on macOS".to_owned()),
+        RawWindowHandle::AppKit(handle) => Ok(NativeWindow {
+            display: None,
+            surface: handle.ns_view,
+        }),
+        RawWindowHandle::Wayland(handle) => {
+            let display = raw_window_handle::HasDisplayHandle::display_handle(window)
+                .map_err(|error| format!("read native display handle: {error}"))?;
+            let RawDisplayHandle::Wayland(display) = display.as_raw() else {
+                return Err(
+                    "GPUI returned mismatched Wayland window and display handles".to_owned(),
+                );
+            };
+            Ok(NativeWindow {
+                display: Some(display.display),
+                surface: handle.surface,
+            })
+        }
+        _ => Err("libghostty native surfaces require macOS or Wayland".to_owned()),
     }
 }
 
@@ -315,6 +344,31 @@ fn key_modifiers(
     (active, consumed)
 }
 
+struct MacKey {
+    keycode: u32,
+    unshifted_codepoint: u32,
+    implied_shift: bool,
+}
+
+fn mac_key(key: &str) -> Option<MacKey> {
+    let (key, implied_shift) = unshifted_macos_key(key);
+    let unshifted_codepoint = match key {
+        "space" => u32::from(' '),
+        _ => single_codepoint(key).map_or(0, u32::from),
+    };
+    Some(MacKey {
+        keycode: mac_keycode(key)?,
+        unshifted_codepoint,
+        implied_shift,
+    })
+}
+
+fn single_codepoint(value: &str) -> Option<char> {
+    let mut chars = value.chars();
+    let first = chars.next()?;
+    chars.next().is_none().then_some(first)
+}
+
 fn unshifted_macos_key(key: &str) -> (&str, bool) {
     match key {
         "!" => ("1", true),
@@ -343,7 +397,11 @@ fn unshifted_macos_key(key: &str) -> (&str, bool) {
 }
 
 fn mac_keycode(key: &str) -> Option<u32> {
+    // Native values mirror Ghostty's pinned macOS keycode table. GPUI does
+    // not expose NSEvent.keyCode, so keys it collapses (notably the keypad)
+    // cannot be distinguished here.
     Some(match key {
+        // ANSI printable keys, ordered by macOS virtual keycode.
         "a" => 0,
         "s" => 1,
         "d" => 2,
@@ -379,7 +437,6 @@ fn mac_keycode(key: &str) -> Option<u32> {
         "[" => 33,
         "i" => 34,
         "p" => 35,
-        "enter" | "return" => 36,
         "l" => 37,
         "j" => 38,
         "'" => 39,
@@ -391,39 +448,46 @@ fn mac_keycode(key: &str) -> Option<u32> {
         "n" => 45,
         "m" => 46,
         "." => 47,
+        "`" => 50,
+
+        // Editing and navigation keys emitted by GPUI.
+        "enter" | "return" => 36,
         "tab" => 48,
         "space" => 49,
-        "`" => 50,
         "backspace" => 51,
         "escape" => 53,
-        "f17" => 64,
-        "f18" => 79,
-        "f19" => 80,
-        "f20" => 90,
-        "f5" => 96,
-        "f6" => 97,
-        "f7" => 98,
-        "f3" => 99,
-        "f8" => 100,
-        "f9" => 101,
-        "f11" => 103,
-        "f13" => 105,
-        "f16" => 106,
-        "f14" => 107,
-        "f10" => 109,
-        "f12" => 111,
-        "f15" => 113,
+        "insert" => 114,
         "home" => 115,
         "pageup" | "page_up" | "page-up" => 116,
         "delete" => 117,
-        "f4" => 118,
         "end" => 119,
-        "f2" => 120,
         "pagedown" | "page_down" | "page-down" => 121,
         "left" => 123,
         "right" => 124,
         "down" => 125,
         "up" => 126,
+
+        // Function keys available in Ghostty's macOS keycode table.
+        "f1" => 122,
+        "f2" => 120,
+        "f3" => 99,
+        "f4" => 118,
+        "f5" => 96,
+        "f6" => 97,
+        "f7" => 98,
+        "f8" => 100,
+        "f9" => 101,
+        "f10" => 109,
+        "f11" => 103,
+        "f12" => 111,
+        "f13" => 105,
+        "f14" => 107,
+        "f15" => 113,
+        "f16" => 106,
+        "f17" => 64,
+        "f18" => 79,
+        "f19" => 80,
+        "f20" => 90,
         _ => return None,
     })
 }
@@ -433,32 +497,78 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keycode_mapping_covers_terminal_navigation_and_repeat_keys() {
-        for key in ["j", "k", "up", "down", "pageup", "pagedown", "escape"] {
-            assert!(mac_keycode(key).is_some(), "missing keycode for {key}");
+    fn physical_mapping_covers_neovim_and_missing_gpui_keys() {
+        for key in [
+            "h", "j", "k", "l", "escape", "insert", "home", "pageup", "delete", "end", "pagedown",
+            "left", "right", "down", "up", "f1", "f20",
+        ] {
+            assert!(mac_key(key).is_some(), "missing {key}");
         }
     }
 
     #[test]
-    fn shifted_punctuation_uses_a_physical_key_event() {
+    fn shifted_printable_keys_preserve_their_physical_key_and_consumed_shift() {
         for (shifted, unshifted) in [
             ("!", "1"),
+            ("@", "2"),
+            ("#", "3"),
+            ("$", "4"),
+            ("%", "5"),
+            ("^", "6"),
+            ("&", "7"),
             ("*", "8"),
+            ("(", "9"),
+            (")", "0"),
+            ("_", "-"),
             ("+", "="),
             ("{", "["),
+            ("}", "]"),
             ("|", "\\"),
             (":", ";"),
             ("\"", "'"),
+            ("<", ","),
+            (">", "."),
             ("?", "/"),
             ("~", "`"),
         ] {
-            let (key, implied_shift) = unshifted_macos_key(shifted);
-            let (active, consumed) = key_modifiers(gpui::Modifiers::default(), implied_shift, true);
-            assert_eq!(key, unshifted);
-            assert!(implied_shift);
-            assert!(mac_keycode(key).is_some());
+            let key = mac_key(shifted).expect("shifted key should map");
+            let base = mac_key(unshifted).expect("base key should map");
+            let (active, consumed) =
+                key_modifiers(gpui::Modifiers::default(), key.implied_shift, true);
+            assert_eq!(key.keycode, base.keycode);
+            assert_eq!(key.unshifted_codepoint, base.unshifted_codepoint);
             assert_eq!(active, Modifiers::SHIFT);
             assert_eq!(consumed, Modifiers::SHIFT);
         }
+    }
+
+    #[test]
+    fn named_keys_do_not_leak_their_names_as_unicode() {
+        assert_eq!(
+            mac_key("space")
+                .expect("space should map")
+                .unshifted_codepoint,
+            u32::from(' ')
+        );
+        for key in ["enter", "escape", "f1", "insert", "up"] {
+            assert_eq!(
+                mac_key(key)
+                    .expect("named key should map")
+                    .unshifted_codepoint,
+                0,
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn shift_is_only_consumed_when_the_key_has_text() {
+        let modifiers = gpui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let (active, consumed) = key_modifiers(modifiers, false, false);
+        assert_eq!(active, Modifiers::SHIFT);
+        assert_eq!(consumed, Modifiers::empty());
     }
 }
