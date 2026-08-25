@@ -1,33 +1,65 @@
 use std::{
     env,
+    ffi::OsStr,
+    fs::{File, OpenOptions},
     path::{Path, PathBuf},
     process::Command,
 };
 
-const GHOSTTY_COMMIT: &str = "9f0e1719";
+const NATIVE_CACHE_VERSION: &str = "1";
+const GHOSTTY_BUILD_OPTIONS: &[&str] = &[
+    "-Dapp-runtime=none",
+    "-Demit-xcframework=false",
+    "-Demit-macos-app=false",
+    "-Demit-docs=false",
+    "-Demit-terminfo=false",
+    "-Demit-bench=false",
+    "-Demit-webdata=false",
+    "-Di18n=false",
+    "-Dsentry=false",
+    "-Doptimize=ReleaseFast",
+];
 
 fn main() {
     println!("cargo:rerun-if-changed=shim/ghostty_surface.m");
-    println!("cargo:rerun-if-changed=vendor/ghostty/build.zig");
-    println!("cargo:rerun-if-changed=vendor/ghostty/build.zig.zon");
+    println!("cargo:rerun-if-changed=vendor/ghostty");
+    println!("cargo:rerun-if-env-changed=GHOSTTY_NATIVE_CACHE_DIR");
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_PACKAGE_CACHE_DIR");
+    println!("cargo:rerun-if-env-changed=PATH");
+    println!("cargo:rerun-if-env-changed=ZIG");
 
-    if env::var_os("CARGO_CFG_TARGET_OS").as_deref() != Some(std::ffi::OsStr::new("macos")) {
+    if env::var_os("CARGO_CFG_TARGET_OS").as_deref() != Some(OsStr::new("macos")) {
         return;
     }
 
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let source = manifest.join("vendor/ghostty");
-    let target =
-        PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory")).join("native");
-    let prefix = target.join(format!("libghostty-{GHOSTTY_COMMIT}"));
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"));
+    let tools = NativeTools::detect();
+    let fingerprint = native_fingerprint(&source, &tools);
+    let cache_root = native_cache_root(&out_dir);
+    let prefix = cache_root.join(&fingerprint);
     let library = prefix.join("lib/libghostty-internal.a");
+    {
+        std::fs::create_dir_all(&cache_root).expect("create shared Ghostty native cache");
+        let cache_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(cache_root.join(format!("{fingerprint}.lock")))
+            .expect("open Ghostty native cache lock");
+        File::lock(&cache_lock).expect("lock Ghostty native cache");
 
-    if !library.exists() {
-        build_ghostty(&source, &target, &prefix);
+        if !library.exists() {
+            if prefix.exists() {
+                std::fs::remove_dir_all(&prefix).expect("remove incomplete Ghostty native build");
+            }
+            build_ghostty(&source, &out_dir, &prefix, &fingerprint, &tools);
+        }
     }
 
-    compile_shim(&manifest, &source);
+    compile_shim(&manifest, &source, &out_dir, &tools);
 
     println!(
         "cargo:rustc-link-search=native={}",
@@ -52,24 +84,17 @@ fn main() {
     }
 }
 
-fn compile_shim(manifest: &Path, source: &Path) {
-    let developer_dir = command_output("/usr/bin/xcode-select", &["-p"], &["DEVELOPER_DIR"]);
-    let sdk_root = command_output(
-        "/usr/bin/xcrun",
-        &["--sdk", "macosx", "--show-sdk-path"],
-        &["DEVELOPER_DIR", "SDKROOT"],
-    );
-    let toolchain = Path::new(&developer_dir).join("Toolchains/XcodeDefault.xctoolchain/usr/bin");
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"));
+fn compile_shim(manifest: &Path, source: &Path, out_dir: &Path, tools: &NativeTools) {
     let object = out_dir.join("ghostty_surface.o");
     let library = out_dir.join("libgpui_ghostty_surface.a");
-    let status = clean_xcode_command(&toolchain.join("clang"), &developer_dir, &sdk_root)
+    let status = tools
+        .command(tools.xcode_tool("clang"))
         .args([
             "-c",
             "-fblocks",
             "-fno-objc-arc",
             "-isysroot",
-            &sdk_root,
+            &tools.sdk_root,
             "-I",
             source
                 .join("include")
@@ -85,7 +110,8 @@ fn compile_shim(manifest: &Path, source: &Path) {
         .status()
         .expect("compile libghostty Objective-C shim");
     assert!(status.success(), "libghostty Objective-C shim failed");
-    let status = clean_xcode_command(&toolchain.join("ar"), &developer_dir, &sdk_root)
+    let status = tools
+        .command(tools.xcode_tool("ar"))
         .args(["rcs", library.to_str().expect("UTF-8 shim library path")])
         .arg(&object)
         .status()
@@ -95,39 +121,70 @@ fn compile_shim(manifest: &Path, source: &Path) {
     println!("cargo:rustc-link-lib=static=gpui_ghostty_surface");
 }
 
-fn clean_xcode_command(program: &Path, developer_dir: &str, sdk_root: &str) -> Command {
-    let mut command = Command::new(program);
-    command
-        .env_remove("NIX_CFLAGS_COMPILE")
-        .env_remove("NIX_LDFLAGS")
-        .env_remove("NIX_CC")
-        .env_remove("NIX_BINTOOLS")
-        .env("DEVELOPER_DIR", developer_dir)
-        .env("SDKROOT", sdk_root);
-    command
+struct NativeTools {
+    developer_dir: String,
+    sdk_root: String,
+    zig: std::ffi::OsString,
 }
 
-fn build_ghostty(source: &Path, target: &Path, prefix: &Path) {
-    let build_source = target.join(format!("ghostty-build-source-{GHOSTTY_COMMIT}"));
-    if build_source.exists() {
-        std::fs::remove_dir_all(&build_source).expect("remove stale writable Ghostty source");
+impl NativeTools {
+    fn detect() -> Self {
+        Self {
+            developer_dir: command_output("/usr/bin/xcode-select", &["-p"], &["DEVELOPER_DIR"]),
+            sdk_root: command_output(
+                "/usr/bin/xcrun",
+                &["--sdk", "macosx", "--show-sdk-path"],
+                &["DEVELOPER_DIR", "SDKROOT"],
+            ),
+            zig: env::var_os("ZIG").unwrap_or_else(|| "zig".into()),
+        }
+    }
+
+    fn toolchain(&self) -> PathBuf {
+        Path::new(&self.developer_dir).join("Toolchains/XcodeDefault.xctoolchain/usr/bin")
+    }
+
+    fn xcode_tool(&self, name: &str) -> PathBuf {
+        self.toolchain().join(name)
+    }
+
+    fn command(&self, program: impl AsRef<OsStr>) -> Command {
+        let mut command = Command::new(program);
+        command
+            .env_remove("NIX_CFLAGS_COMPILE")
+            .env_remove("NIX_LDFLAGS")
+            .env_remove("NIX_CC")
+            .env_remove("NIX_BINTOOLS")
+            .env("DEVELOPER_DIR", &self.developer_dir)
+            .env("SDKROOT", &self.sdk_root);
+        command
+    }
+}
+
+fn build_ghostty(
+    source: &Path,
+    out_dir: &Path,
+    prefix: &Path,
+    fingerprint: &str,
+    tools: &NativeTools,
+) {
+    let native_work = out_dir.join("native");
+    let build_source = native_work.join(format!("ghostty-build-source-{fingerprint}"));
+    let staging_prefix = native_work.join(format!("ghostty-prefix-{fingerprint}"));
+    for stale in [&build_source, &staging_prefix] {
+        if stale.exists() {
+            std::fs::remove_dir_all(stale).expect("remove stale Ghostty build directory");
+        }
     }
     copy_tree(source, &build_source);
 
-    let developer_dir = command_output("/usr/bin/xcode-select", &["-p"], &["DEVELOPER_DIR"]);
-    let sdk_root = command_output(
-        "/usr/bin/xcrun",
-        &["--sdk", "macosx", "--show-sdk-path"],
-        &["DEVELOPER_DIR", "SDKROOT"],
-    );
-    let toolchain = Path::new(&developer_dir).join("Toolchains/XcodeDefault.xctoolchain/usr/bin");
-    let zig = env::var_os("ZIG").unwrap_or_else(|| "zig".into());
+    let toolchain = tools.toolchain();
     let path = format!(
         "{}:/usr/bin:/bin:{}",
         toolchain.display(),
         env::var("PATH").unwrap_or_default()
     );
-    let package_cache = package_cache_dir(target);
+    let package_cache = package_cache_dir(out_dir);
     std::fs::create_dir_all(&package_cache).expect("create shared Ghostty package cache");
     let source_package_cache = build_source.join("zig-pkg");
     let linked_package_cache = std::fs::symlink_metadata(&source_package_cache).is_err();
@@ -137,46 +194,145 @@ fn build_ghostty(source: &Path, target: &Path, prefix: &Path) {
             .expect("link Ghostty package cache into the shared target directory");
     }
 
-    let status = Command::new(zig)
+    let mut command = tools.command(&tools.zig);
+    command
         .current_dir(&build_source)
-        .env_remove("NIX_CFLAGS_COMPILE")
-        .env_remove("NIX_LDFLAGS")
-        .env_remove("NIX_CC")
-        .env_remove("NIX_BINTOOLS")
-        .env("DEVELOPER_DIR", &developer_dir)
-        .env("SDKROOT", &sdk_root)
         .env("CC", toolchain.join("clang"))
         .env("AR", toolchain.join("ar"))
         .env("LD", toolchain.join("ld"))
         .env("PATH", path)
-        .env("ZIG_GLOBAL_CACHE_DIR", target.join("zig-global-cache"))
-        .env("ZIG_LOCAL_CACHE_DIR", target.join("ghostty-zig-cache"))
-        .args([
-            "build",
-            "--prefix",
-            prefix.to_str().expect("UTF-8 Ghostty install prefix"),
-            "-Dapp-runtime=none",
-            "-Demit-xcframework=false",
-            "-Demit-macos-app=false",
-            "-Demit-docs=false",
-            "-Demit-terminfo=false",
-            "-Demit-bench=false",
-            "-Demit-webdata=false",
-            "-Di18n=false",
-            "-Dsentry=false",
-            "-Doptimize=ReleaseFast",
-        ])
-        .status()
-        .expect("run Zig to build libghostty");
+        .env(
+            "ZIG_GLOBAL_CACHE_DIR",
+            shared_target_root(out_dir).join("ghostty-zig-global-cache"),
+        )
+        .env("ZIG_LOCAL_CACHE_DIR", native_work.join("ghostty-zig-cache"))
+        .args(["build", "--prefix"])
+        .arg(&staging_prefix)
+        .args(GHOSTTY_BUILD_OPTIONS);
+    let status = command.status();
+
     if linked_package_cache {
         std::fs::remove_file(&source_package_cache)
             .expect("remove temporary Ghostty package cache link");
     }
-    assert!(status.success(), "libghostty Zig build failed");
+    let status = status.unwrap_or_else(|error| {
+        cleanup_build(&build_source, &staging_prefix);
+        panic!(
+            "run Zig to build libghostty with {:?}: {error}; install Zig 0.16 or set ZIG",
+            tools.zig
+        )
+    });
+    if !status.success() {
+        cleanup_build(&build_source, &staging_prefix);
+        panic!("libghostty Zig build failed");
+    }
+    if !staging_prefix.join("lib/libghostty-internal.a").is_file() {
+        cleanup_build(&build_source, &staging_prefix);
+        panic!("libghostty Zig build did not produce its static archive");
+    }
+
+    std::fs::rename(&staging_prefix, prefix).expect("publish Ghostty native build");
     std::fs::remove_dir_all(build_source).expect("remove writable Ghostty build source");
 }
 
-fn package_cache_dir(native_target: &Path) -> PathBuf {
+fn cleanup_build(source: &Path, prefix: &Path) {
+    let _ = std::fs::remove_dir_all(source);
+    let _ = std::fs::remove_dir_all(prefix);
+}
+
+fn native_fingerprint(source: &Path, tools: &NativeTools) -> String {
+    let zig_version = tools
+        .command(&tools.zig)
+        .arg("version")
+        .output()
+        .unwrap_or_else(|error| {
+            panic!(
+                "read Zig version from {:?}: {error}; install Zig 0.16 or set ZIG",
+                tools.zig
+            )
+        });
+    assert!(zig_version.status.success(), "read Zig version");
+
+    let mut hash = Fnv128::new();
+    hash.write_field(NATIVE_CACHE_VERSION.as_bytes());
+    hash.write_field(env::var("TARGET").expect("Cargo target triple").as_bytes());
+    hash.write_field(&zig_version.stdout);
+    hash.write_field(tools.developer_dir.as_bytes());
+    hash.write_field(tools.sdk_root.as_bytes());
+    for option in GHOSTTY_BUILD_OPTIONS {
+        hash.write_field(option.as_bytes());
+    }
+    hash_tree(source, source, &mut hash);
+    format!("{:032x}", hash.finish())
+}
+
+fn hash_tree(root: &Path, directory: &Path, hash: &mut Fnv128) {
+    let mut entries: Vec<_> = std::fs::read_dir(directory)
+        .unwrap_or_else(|error| panic!("read {}: {error}", directory.display()))
+        .map(|entry| entry.expect("read vendored Ghostty source entry"))
+        .collect();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+
+    for entry in entries {
+        let path = entry.path();
+        let relative = path.strip_prefix(root).expect("Ghostty source path");
+        let file_type = entry
+            .file_type()
+            .unwrap_or_else(|error| panic!("read {} type: {error}", path.display()));
+        hash.write_field(relative.to_string_lossy().as_bytes());
+        if file_type.is_dir() {
+            hash.write_field(b"directory");
+            hash_tree(root, &path, hash);
+        } else if file_type.is_file() {
+            hash.write_field(b"file");
+            let contents = std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            hash.write_field(&contents);
+        } else {
+            panic!(
+                "unsupported entry in vendored Ghostty source: {}",
+                path.display()
+            );
+        }
+    }
+}
+
+struct Fnv128(u128);
+
+impl Fnv128 {
+    const OFFSET_BASIS: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+
+    const fn new() -> Self {
+        Self(Self::OFFSET_BASIS)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.0 ^= u128::from(*byte);
+            self.0 = self.0.wrapping_mul(Self::PRIME);
+        }
+    }
+
+    fn write_field(&mut self, bytes: &[u8]) {
+        self.write(&(bytes.len() as u64).to_le_bytes());
+        self.write(bytes);
+    }
+
+    const fn finish(&self) -> u128 {
+        self.0
+    }
+}
+
+fn native_cache_root(out_dir: &Path) -> PathBuf {
+    if let Some(path) = env::var_os("GHOSTTY_NATIVE_CACHE_DIR").map(PathBuf::from) {
+        assert!(path.is_absolute(), "Ghostty native cache must be absolute");
+        return path;
+    }
+    shared_target_root(out_dir).join("gpui-ghostty-native")
+}
+
+fn package_cache_dir(out_dir: &Path) -> PathBuf {
     if let Some(path) = env::var_os("GHOSTTY_ZIG_PACKAGE_CACHE_DIR").map(PathBuf::from) {
         assert!(
             path.is_absolute(),
@@ -184,24 +340,20 @@ fn package_cache_dir(native_target: &Path) -> PathBuf {
         );
         return path;
     }
-
-    if let Some(path) = env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        && !is_nix_store_path(&path)
-    {
-        return path.join("ghostty-zig-pkg");
-    }
-
-    native_target.join("ghostty-zig-pkg")
+    shared_target_root(out_dir).join("ghostty-zig-pkg")
 }
 
-fn is_nix_store_path(path: &Path) -> bool {
-    path.starts_with(
-        env::var_os("NIX_STORE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/nix/store")),
-    )
+fn shared_target_root(out_dir: &Path) -> PathBuf {
+    let package_dir = out_dir.parent();
+    let build_dir = package_dir.and_then(Path::parent);
+    let profile_dir = build_dir.and_then(Path::parent);
+    if out_dir.file_name() == Some(OsStr::new("out"))
+        && build_dir.and_then(Path::file_name) == Some(OsStr::new("build"))
+        && let Some(root) = profile_dir.and_then(Path::parent)
+    {
+        return root.to_path_buf();
+    }
+    out_dir.join("shared-native-cache")
 }
 
 fn copy_tree(source: &Path, destination: &Path) {
