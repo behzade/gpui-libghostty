@@ -2,6 +2,12 @@
 
 Native Ghostty terminal and embedded Neovim components for GPUI.
 
+## Demo
+
+Embedded Neovim editing this project's README with completion:
+
+https://github.com/user-attachments/assets/140e3552-1074-4994-b91d-d0966fe623c9
+
 ## Status
 Project status is alpha, expect bugs and instability.
 
