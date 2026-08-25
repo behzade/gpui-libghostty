@@ -2,6 +2,9 @@
 
 Native Ghostty terminal and embedded Neovim components for GPUI.
 
+## Status
+Project status is alpha, expect bugs and instability.
+
 ## Crates
 
 - `gpui-libghostty` hosts a command in Ghostty's native Metal renderer on
