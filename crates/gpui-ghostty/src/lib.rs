@@ -1,7 +1,7 @@
 //! Native libghostty terminal component for GPUI.
 //!
-//! The renderer currently uses Ghostty's macOS Metal surface API. Other targets
-//! compile, but [`Terminal::spawn`] returns an unsupported-platform error.
+//! Rendering uses Ghostty's Metal embedded surface on macOS and a native
+//! Wayland subsurface backed by its OpenGL renderer on Linux.
 
 mod native;
 mod terminal;

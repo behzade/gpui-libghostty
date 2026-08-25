@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_config = @import("../build_config.zig");
 const assert = @import("../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const objc = @import("objc");
@@ -28,6 +29,10 @@ const log = std.log.scoped(.embedded_window);
 pub const resourcesDir = internal_os.resourcesDir;
 
 pub const App = struct {
+    /// OpenGL contexts are owned by the embedder and current on its application
+    /// thread, so renderer-thread draws must be routed back there.
+    pub const must_draw_from_app_thread = build_config.renderer == .opengl;
+
     /// Because we only expect the embedding API to be used in embedded
     /// environments, the options are extern so that we can expose it
     /// directly to a C callconv and not pay for any translation costs.
@@ -364,6 +369,7 @@ pub const App = struct {
 pub const Platform = union(PlatformTag) {
     macos: MacOS,
     ios: IOS,
+    opengl: OpenGL,
 
     // If our build target for libghostty is not darwin then we do
     // not include macos support at all.
@@ -377,6 +383,12 @@ pub const Platform = union(PlatformTag) {
         uiview: objc.Object,
     } else void;
 
+    const GLProc = *const fn () callconv(.c) void;
+
+    pub const OpenGL = struct {
+        get_proc_address: *const fn ([*:0]const u8) callconv(.c) ?GLProc,
+    };
+
     // The C ABI compatible version of this union. The tag is expected
     // to be stored elsewhere.
     pub const C = extern union {
@@ -386,6 +398,10 @@ pub const Platform = union(PlatformTag) {
 
         ios: extern struct {
             uiview: ?*anyopaque,
+        },
+
+        opengl: extern struct {
+            get_proc_address: ?*const fn ([*:0]const u8) callconv(.c) ?GLProc,
         },
     };
 
@@ -406,6 +422,11 @@ pub const Platform = union(PlatformTag) {
                     break :ios error.UIViewMustBeSet);
                 break :ios .{ .ios = .{ .uiview = uiview } };
             } else error.UnsupportedPlatform,
+
+            .opengl => .{ .opengl = .{
+                .get_proc_address = c_platform.opengl.get_proc_address orelse
+                    return error.OpenGLGetProcAddressMustBeSet,
+            } },
         };
     }
 };
@@ -416,6 +437,7 @@ pub const PlatformTag = enum(c_int) {
 
     macos = 1,
     ios = 2,
+    opengl = 3,
 };
 
 pub const EnvVar = extern struct {

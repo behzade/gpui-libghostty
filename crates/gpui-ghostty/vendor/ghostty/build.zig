@@ -203,17 +203,15 @@ pub fn build(b: *std.Build) !void {
         // This is NOT libghostty (even though its named that for historical
         // reasons). It is just the glue between Ghostty GUI on macOS and
         // the full Ghostty GUI core.
-        const lib_shared = try buildpkg.GhosttyLib.initShared(b, &deps);
         const lib_static = try buildpkg.GhosttyLib.initStatic(b, &deps);
-
-        lib_shared.installHeader(); // Only need one header
+        lib_static.installHeader();
         if (config.target.result.os.tag == .windows) {
+            const lib_shared = try buildpkg.GhosttyLib.initShared(b, &deps);
             lib_shared.install("ghostty-internal.dll");
             lib_static.install("ghostty-internal-static.lib");
         } else if (config.target.result.os.tag.isDarwin()) {
             lib_static.install("libghostty-internal.a");
         } else {
-            lib_shared.install("ghostty-internal.so");
             lib_static.install("ghostty-internal.a");
         }
     }

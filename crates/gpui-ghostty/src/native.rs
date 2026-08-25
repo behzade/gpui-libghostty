@@ -1,9 +1,48 @@
-//! Safe, narrow Rust ownership wrapper for Ghostty's internal macOS surface API.
+//! Safe, narrow Rust ownership wrappers for Ghostty's native render surfaces.
 
-use std::{
-    ffi::{CStr, c_void},
-    ptr::NonNull,
-};
+use std::{ffi::c_void, ptr::NonNull, sync::Arc};
+
+#[cfg(not(target_os = "linux"))]
+use std::ffi::CStr;
+
+use async_channel::{Receiver, Sender};
+
+#[derive(Clone)]
+pub struct NativeWakeup {
+    sender: Arc<Sender<()>>,
+    receiver: Receiver<()>,
+}
+
+impl NativeWakeup {
+    fn new() -> Self {
+        let (sender, receiver) = async_channel::bounded(1);
+        Self {
+            sender: Arc::new(sender),
+            receiver,
+        }
+    }
+
+    pub async fn wait(&self) {
+        let _ = self.receiver.recv().await;
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn signal(&self) {
+        let _ = self.sender.try_send(());
+    }
+
+    fn userdata(&self) -> *mut c_void {
+        Arc::as_ptr(&self.sender).cast_mut().cast()
+    }
+}
+
+unsafe extern "C" fn native_wakeup(userdata: *mut c_void) {
+    let Some(sender) = NonNull::new(userdata.cast::<Sender<()>>()) else {
+        return;
+    };
+    // SAFETY: NativeSurface keeps the Arc allocation alive until native teardown completes.
+    let _ = unsafe { sender.as_ref() }.try_send(());
+}
 
 #[cfg(target_os = "macos")]
 use std::{
@@ -26,10 +65,11 @@ mod platform {
             parent_view: *mut c_void,
             working_directory: *const c_char,
             command: *const c_char,
+            wakeup_userdata: *mut c_void,
+            wakeup: unsafe extern "C" fn(*mut c_void),
         ) -> *mut RawSurface;
         fn gpui_ghostty_surface_free(surface: *mut RawSurface);
         fn gpui_ghostty_surface_tick(surface: *mut RawSurface);
-        fn gpui_ghostty_surface_needs_tick(surface: *const RawSurface) -> bool;
         fn gpui_ghostty_surface_is_alive(surface: *const RawSurface) -> bool;
         fn gpui_ghostty_surface_set_frame(
             surface: *mut RawSurface,
@@ -72,6 +112,7 @@ mod platform {
 
     pub struct NativeSurface {
         raw: NonNull<RawSurface>,
+        wakeup: NativeWakeup,
         _main_thread: PhantomData<Rc<()>>,
     }
 
@@ -81,10 +122,13 @@ mod platform {
         /// The caller must invoke this on the AppKit main thread and keep the parent
         /// view alive until this value is dropped.
         pub fn new(
+            _display: Option<NonNull<c_void>>,
             parent_view: NonNull<c_void>,
+            _scale_factor: f64,
             working_directory: &CStr,
             command: &CStr,
         ) -> Result<Self, &'static str> {
+            let wakeup = NativeWakeup::new();
             // SAFETY: The C shim validates creation failures. The parent pointer and
             // main-thread lifetime requirements are this method's documented boundary.
             let raw = unsafe {
@@ -92,13 +136,20 @@ mod platform {
                     parent_view.as_ptr(),
                     working_directory.as_ptr(),
                     command.as_ptr(),
+                    wakeup.userdata(),
+                    native_wakeup,
                 )
             };
             let raw = NonNull::new(raw).ok_or("libghostty could not create a terminal surface")?;
             Ok(Self {
                 raw,
+                wakeup,
                 _main_thread: PhantomData,
             })
+        }
+
+        pub fn wakeup(&self) -> NativeWakeup {
+            self.wakeup.clone()
         }
 
         pub fn tick(&mut self) {
@@ -106,17 +157,12 @@ mod platform {
             unsafe { gpui_ghostty_surface_tick(self.raw.as_ptr()) }
         }
 
-        pub fn needs_tick(&self) -> bool {
-            // SAFETY: `raw` remains valid for this value's lifetime.
-            unsafe { gpui_ghostty_surface_needs_tick(self.raw.as_ptr()) }
-        }
-
         pub fn is_alive(&self) -> bool {
             // SAFETY: `raw` remains valid for this value's lifetime.
             unsafe { gpui_ghostty_surface_is_alive(self.raw.as_ptr()) }
         }
 
-        pub fn set_frame(&mut self, x: f64, y: f64, width: f64, height: f64) {
+        pub fn set_frame(&mut self, x: f64, y: f64, width: f64, height: f64, _scale_factor: f64) {
             // SAFETY: `raw` is valid and geometry values cross the C boundary by value.
             unsafe { gpui_ghostty_surface_set_frame(self.raw.as_ptr(), x, y, width, height) }
         }
@@ -186,6 +232,16 @@ mod platform {
             }
         }
 
+        pub fn take_clipboard_read(&mut self) -> Option<ClipboardRead> {
+            None
+        }
+
+        pub fn complete_clipboard_read(&mut self, _request: ClipboardRead, _text: &CStr) {}
+
+        pub fn take_clipboard_write(&mut self) -> Option<ClipboardWrite> {
+            None
+        }
+
         pub fn mouse_scroll(&mut self, x: f64, y: f64, precision: bool) {
             // Bit zero is Ghostty's high-precision scroll flag. Momentum is left
             // unset because GPUI does not expose AppKit's momentum phase directly.
@@ -206,27 +262,36 @@ mod platform {
 #[cfg(target_os = "macos")]
 pub use platform::NativeSurface;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+mod wayland;
+#[cfg(target_os = "linux")]
+pub use linux::NativeSurface;
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub struct NativeSurface;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 impl NativeSurface {
     pub fn new(
+        _display: Option<NonNull<c_void>>,
         _parent_view: NonNull<c_void>,
+        _scale_factor: f64,
         _working_directory: &CStr,
         _command: &CStr,
     ) -> Result<Self, &'static str> {
-        Err("libghostty native surfaces are only available on macOS")
+        Err("libghostty native surfaces require macOS or Wayland")
     }
 
-    pub fn tick(&mut self) {}
-    pub fn needs_tick(&self) -> bool {
-        false
+    pub fn wakeup(&self) -> NativeWakeup {
+        NativeWakeup::new()
     }
+    pub fn tick(&mut self) {}
     pub fn is_alive(&self) -> bool {
         false
     }
-    pub fn set_frame(&mut self, _x: f64, _y: f64, _width: f64, _height: f64) {}
+    pub fn set_frame(&mut self, _x: f64, _y: f64, _width: f64, _height: f64, _scale_factor: f64) {}
     pub fn set_visible(&mut self, _visible: bool) {}
     pub fn set_focus(&mut self, _focused: bool) {}
     pub fn key(
@@ -250,6 +315,24 @@ impl NativeSurface {
     ) {
     }
     pub fn mouse_scroll(&mut self, _x: f64, _y: f64, _precision: bool) {}
+    pub fn take_clipboard_read(&mut self) -> Option<ClipboardRead> {
+        None
+    }
+    pub fn complete_clipboard_read(&mut self, _request: ClipboardRead, _text: &CStr) {}
+    pub fn take_clipboard_write(&mut self) -> Option<ClipboardWrite> {
+        None
+    }
+}
+
+pub struct ClipboardRead {
+    pub selection: bool,
+    #[allow(dead_code)]
+    pub request: NonNull<c_void>,
+}
+
+pub struct ClipboardWrite {
+    pub selection: bool,
+    pub text: String,
 }
 
 #[derive(Clone, Copy)]
@@ -296,4 +379,22 @@ pub enum MouseButton {
     Left = 1,
     Right = 2,
     Middle = 3,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_wakeup_coalesces_duplicate_signals() {
+        let wakeup = NativeWakeup::new();
+        wakeup.signal();
+        wakeup.signal();
+
+        assert_eq!(wakeup.receiver.try_recv(), Ok(()));
+        assert_eq!(
+            wakeup.receiver.try_recv(),
+            Err(async_channel::TryRecvError::Empty)
+        );
+    }
 }

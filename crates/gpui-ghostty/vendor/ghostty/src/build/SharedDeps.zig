@@ -670,15 +670,18 @@ pub fn add(
         }
     }
 
-    // If we're building an exe then we have additional dependencies.
-    if (step.kind != .lib) {
-        // We always statically compile glad
+    // OpenGL libraries need their own GLAD implementation because the host
+    // supplies only a context and procedure lookup callback.
+    if (step.kind != .lib or self.config.renderer == .opengl) {
         step.root_module.addIncludePath(b.path("vendor/glad/include/"));
         step.root_module.addCSourceFile(.{
             .file = b.path("vendor/glad/src/gl.c"),
             .flags = &.{},
         });
+    }
 
+    // If we're building an exe then we have additional dependencies.
+    if (step.kind != .lib) {
         // When we're targeting flatpak we ALWAYS link GTK so we
         // get access to glib for dbus.
         if (self.config.flatpak) {

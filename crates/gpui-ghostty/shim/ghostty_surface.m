@@ -14,19 +14,22 @@
 }
 @end
 
+typedef void (*gpui_ghostty_wakeup_cb)(void *userdata);
+
 typedef struct gpui_ghostty_surface {
     ghostty_config_t config;
     ghostty_app_t app;
     ghostty_surface_t surface;
     NSView *parent;
     GpuiGhosttyView *view;
+    void *wakeup_userdata;
+    gpui_ghostty_wakeup_cb wakeup;
     _Atomic bool alive;
-    _Atomic bool needs_tick;
 } gpui_ghostty_surface;
 
 static void runtime_wakeup(void *userdata) {
     gpui_ghostty_surface *state = userdata;
-    atomic_store_explicit(&state->needs_tick, true, memory_order_release);
+    state->wakeup(state->wakeup_userdata);
 }
 
 static bool runtime_action(ghostty_app_t app, ghostty_target_s target, ghostty_action_s action) {
@@ -88,12 +91,15 @@ static void runtime_close_surface(void *userdata, bool process_alive) {
     (void)process_alive;
     gpui_ghostty_surface *state = userdata;
     atomic_store_explicit(&state->alive, false, memory_order_release);
+    runtime_wakeup(state);
 }
 
 gpui_ghostty_surface *gpui_ghostty_surface_new(
     void *parent_view,
     const char *working_directory,
-    const char *command
+    const char *command,
+    void *wakeup_userdata,
+    gpui_ghostty_wakeup_cb wakeup
 ) {
     static dispatch_once_t once;
     static int init_result = -1;
@@ -101,12 +107,14 @@ gpui_ghostty_surface *gpui_ghostty_surface_new(
         setenv("GHOSTTY_LOG", "stderr", 0);
         init_result = ghostty_init(0, NULL);
     });
-    if (init_result != GHOSTTY_SUCCESS || parent_view == NULL) return NULL;
+    if (init_result != GHOSTTY_SUCCESS || parent_view == NULL ||
+        wakeup_userdata == NULL || wakeup == NULL) return NULL;
 
     gpui_ghostty_surface *state = calloc(1, sizeof(gpui_ghostty_surface));
     if (state == NULL) return NULL;
     atomic_init(&state->alive, true);
-    atomic_init(&state->needs_tick, false);
+    state->wakeup_userdata = wakeup_userdata;
+    state->wakeup = wakeup;
     state->parent = (NSView *)parent_view;
     state->view = [[GpuiGhosttyView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
     [state->view setHidden:YES];
@@ -174,12 +182,7 @@ void gpui_ghostty_surface_free(gpui_ghostty_surface *state) {
 
 void gpui_ghostty_surface_tick(gpui_ghostty_surface *state) {
     if (state == NULL || state->app == NULL) return;
-    atomic_store_explicit(&state->needs_tick, false, memory_order_release);
     ghostty_app_tick(state->app);
-}
-
-bool gpui_ghostty_surface_needs_tick(const gpui_ghostty_surface *state) {
-    return state != NULL && atomic_load_explicit(&state->needs_tick, memory_order_acquire);
 }
 
 bool gpui_ghostty_surface_is_alive(const gpui_ghostty_surface *state) {

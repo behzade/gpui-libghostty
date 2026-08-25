@@ -169,10 +169,9 @@ pub fn surfaceInit(surface: *apprt.Surface) !void {
         apprt.gtk,
         => try prepareContext(null),
 
-        apprt.embedded => {
-            // TODO(mitchellh): this does nothing today to allow libghostty
-            // to compile for OpenGL targets but libghostty is strictly
-            // broken for rendering on this platforms.
+        apprt.embedded => switch (surface.platform) {
+            .opengl => |platform| try prepareContext(platform.get_proc_address),
+            else => return error.UnsupportedPlatform,
         },
     }
 
@@ -278,8 +277,9 @@ pub fn initShaders(
 /// Get the current size of the runtime surface.
 pub fn surfaceSize(self: *const OpenGL) !struct { width: u32, height: u32 } {
     _ = self;
+    const get_integerv = gl.glad.context.GetIntegerv orelse return error.OpenGLNotLoaded;
     var viewport: [4]gl.c.GLint = undefined;
-    gl.glad.context.GetIntegerv.?(gl.c.GL_VIEWPORT, &viewport);
+    get_integerv(gl.c.GL_VIEWPORT, &viewport);
     return .{
         .width = @intCast(viewport[2]),
         .height = @intCast(viewport[3]),

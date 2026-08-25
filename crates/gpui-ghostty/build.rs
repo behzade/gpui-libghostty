@@ -22,13 +22,19 @@ const GHOSTTY_BUILD_OPTIONS: &[&str] = &[
 
 fn main() {
     println!("cargo:rerun-if-changed=shim/ghostty_surface.m");
+    println!("cargo:rerun-if-changed=shim/ghostty_surface_linux.c");
     println!("cargo:rerun-if-changed=vendor/ghostty");
     println!("cargo:rerun-if-env-changed=GHOSTTY_NATIVE_CACHE_DIR");
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_PACKAGE_CACHE_DIR");
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=ZIG");
 
-    if env::var_os("CARGO_CFG_TARGET_OS").as_deref() != Some(OsStr::new("macos")) {
+    let target_os = env::var_os("CARGO_CFG_TARGET_OS");
+    if target_os.as_deref() == Some(OsStr::new("linux")) {
+        build_linux();
+        return;
+    }
+    if target_os.as_deref() != Some(OsStr::new("macos")) {
         return;
     }
 
@@ -82,6 +88,150 @@ fn main() {
     ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
+}
+
+fn build_linux() {
+    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
+    let source = manifest.join("vendor/ghostty");
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"));
+    let zig = env::var_os("ZIG").unwrap_or_else(|| "zig".into());
+    let fingerprint = linux_native_fingerprint(&source, &zig);
+    let cache_root = native_cache_root(&out_dir);
+    let prefix = cache_root.join(&fingerprint);
+    let library = prefix.join("lib/libghostty-internal.a");
+
+    std::fs::create_dir_all(&cache_root).expect("create shared Ghostty native cache");
+    let cache_lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(cache_root.join(format!("{fingerprint}.lock")))
+        .expect("open Ghostty native cache lock");
+    File::lock(&cache_lock).expect("lock Ghostty native cache");
+    if !library.exists() {
+        if prefix.exists() {
+            std::fs::remove_dir_all(&prefix).expect("remove incomplete Ghostty native build");
+        }
+        build_ghostty_linux(&source, &out_dir, &prefix, &fingerprint, &zig);
+    }
+    drop(cache_lock);
+
+    compile_linux_shim(&manifest, &source, &out_dir, &zig);
+    println!(
+        "cargo:rustc-link-search=native={}",
+        prefix.join("lib").display()
+    );
+    println!("cargo:rustc-link-lib=static=ghostty-internal");
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static=gpui_ghostty_surface_linux");
+    for library in ["c++", "dl", "pthread", "m"] {
+        println!("cargo:rustc-link-lib={library}");
+    }
+}
+
+fn build_ghostty_linux(
+    source: &Path,
+    out_dir: &Path,
+    prefix: &Path,
+    fingerprint: &str,
+    zig: &OsStr,
+) {
+    let native_work = out_dir.join("native-linux");
+    let build_source = native_work.join(format!("ghostty-build-source-{fingerprint}"));
+    let staging_prefix = native_work.join(format!("ghostty-prefix-{fingerprint}"));
+    for stale in [&build_source, &staging_prefix] {
+        if stale.exists() {
+            std::fs::remove_dir_all(stale).expect("remove stale Ghostty Linux build directory");
+        }
+    }
+    copy_tree(source, &build_source);
+
+    let package_cache = package_cache_dir(out_dir);
+    std::fs::create_dir_all(&package_cache).expect("create shared Ghostty package cache");
+    let source_package_cache = build_source.join("zig-pkg");
+    let linked_package_cache = std::fs::symlink_metadata(&source_package_cache).is_err();
+    if linked_package_cache {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&package_cache, &source_package_cache)
+            .expect("link Ghostty package cache into the shared target directory");
+    }
+
+    let status = Command::new(zig)
+        .current_dir(&build_source)
+        .env(
+            "ZIG_GLOBAL_CACHE_DIR",
+            shared_target_root(out_dir).join("ghostty-zig-global-cache"),
+        )
+        .env("ZIG_LOCAL_CACHE_DIR", native_work.join("ghostty-zig-cache"))
+        .args(["build", "--prefix"])
+        .arg(&staging_prefix)
+        .args(GHOSTTY_BUILD_OPTIONS)
+        .arg("-Drenderer=opengl")
+        .status();
+    if linked_package_cache {
+        std::fs::remove_file(&source_package_cache)
+            .expect("remove temporary Ghostty package cache link");
+    }
+    let status = status.unwrap_or_else(|error| {
+        cleanup_build(&build_source, &staging_prefix);
+        panic!("run Zig to build Linux libghostty with {zig:?}: {error}")
+    });
+    if !status.success() {
+        cleanup_build(&build_source, &staging_prefix);
+        panic!("Linux libghostty Zig build failed");
+    }
+
+    let emitted = staging_prefix.join("lib/ghostty-internal.a");
+    let installed = staging_prefix.join("lib/libghostty-internal.a");
+    if emitted.is_file() {
+        std::fs::rename(&emitted, &installed).expect("normalize Linux libghostty archive name");
+    }
+    if !installed.is_file() {
+        cleanup_build(&build_source, &staging_prefix);
+        panic!("Linux libghostty build did not produce its static archive");
+    }
+    std::fs::rename(&staging_prefix, prefix).expect("publish Ghostty Linux native build");
+    std::fs::remove_dir_all(build_source).expect("remove writable Ghostty Linux build source");
+}
+
+fn compile_linux_shim(manifest: &Path, source: &Path, out_dir: &Path, zig: &OsStr) {
+    let object = out_dir.join("ghostty_surface_linux.o");
+    let library = out_dir.join("libgpui_ghostty_surface_linux.a");
+    let status = Command::new(zig)
+        .args(["cc", "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-c", "-I"])
+        .arg(source.join("include"))
+        .arg(manifest.join("shim/ghostty_surface_linux.c"))
+        .arg("-o")
+        .arg(&object)
+        .status()
+        .expect("compile Linux libghostty shim");
+    assert!(status.success(), "Linux libghostty C shim failed");
+    let status = Command::new(zig)
+        .args(["ar", "rcs"])
+        .arg(&library)
+        .arg(&object)
+        .status()
+        .expect("archive Linux libghostty shim");
+    assert!(status.success(), "Linux libghostty C shim archive failed");
+}
+
+fn linux_native_fingerprint(source: &Path, zig: &OsStr) -> String {
+    let zig_version = Command::new(zig)
+        .arg("version")
+        .output()
+        .unwrap_or_else(|error| panic!("read Zig version from {zig:?}: {error}"));
+    assert!(zig_version.status.success(), "read Zig version");
+    let mut hash = Fnv128::new();
+    hash.write_field(NATIVE_CACHE_VERSION.as_bytes());
+    hash.write_field(env::var("TARGET").expect("Cargo target triple").as_bytes());
+    hash.write_field(&zig_version.stdout);
+    for option in GHOSTTY_BUILD_OPTIONS {
+        hash.write_field(option.as_bytes());
+    }
+    hash.write_field(b"-Drenderer=opengl");
+    hash_tree(source, source, &mut hash);
+    format!("{:032x}", hash.finish())
 }
 
 fn compile_shim(manifest: &Path, source: &Path, out_dir: &Path, tools: &NativeTools) {

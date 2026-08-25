@@ -16,8 +16,17 @@ exclude = [
 ]
 
 [dependencies]
+async-channel.workspace = true
 gpui.workspace = true
 raw-window-handle.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+khronos-egl = { version = "6.0", features = ["dynamic"] }
+libc.workspace = true
+libloading = "0.8"
+wayland-backend = { version = "0.3", features = ["client_system", "dlopen"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
 
 [lints.rust]
 unsafe_code = "allow"

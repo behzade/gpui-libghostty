@@ -4,22 +4,26 @@ Native Ghostty terminal and embedded Neovim components for GPUI.
 
 ## Crates
 
-- `gpui-libghostty` hosts a command in Ghostty's native Metal renderer and
+- `gpui-libghostty` hosts a command in Ghostty's native Metal renderer on
+  macOS or its OpenGL renderer in a native Wayland subsurface on Linux, and
   forwards GPUI keyboard, key-repeat, mouse, scroll, focus, resize, and
   visibility events.
 - `gpui-neovim` starts Neovim with a private RPC socket and opens later files in
   the same editor instance.
 
-The native renderer currently supports macOS. Ghostty's embedded platform API
-exposes macOS and iOS native views; Linux uses Ghostty's GTK application runtime
-and needs a separate GTK/OpenGL host adapter. Ghostty is pinned to commit
+The native renderer supports macOS and Wayland. Linux uses a caller-owned EGL
+OpenGL 4.3 context and does not depend on Ghostty's GTK application runtime or
+copy frames through CPU memory. Fractional scaling uses `wp_viewporter` when
+available and falls back to an integer Wayland buffer scale. X11 is
+intentionally unsupported. Ghostty is
+pinned to commit
 `9f0e1719dc918368367d368bfe300f59bb68b5a4`; the required, pruned source closure
 is under `crates/gpui-ghostty/vendor/ghostty` so Cargo and Crane include it
 with the package.
 
 ## Requirements
 
-- macOS and Xcode command-line tools
+- macOS and Xcode command-line tools, or Wayland with EGL, libc++, and desktop OpenGL 4.3
 - Zig 0.16
 - Neovim for `gpui-neovim`
 

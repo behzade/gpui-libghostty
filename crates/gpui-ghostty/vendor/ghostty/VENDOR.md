@@ -5,13 +5,16 @@
 - License: MIT (`LICENSE`)
 
 This vendor contains the source closure required to build Ghostty's internal
-macOS surface library. Application, packaging, documentation, test, and
-non-build assets were removed. Upstream-only test fonts and fixtures were also
+macOS Metal and embedded Linux OpenGL surface libraries. Application,
+packaging, documentation, test, and non-build assets were removed. Upstream-only test fonts and fixtures were also
 removed from `src/font/embedded.zig` and `pkg/wuffs/src`.
 
 Local patches:
 
-- `build.zig` installs the macOS static `libghostty-internal.a` without building
-  an XCFramework.
-- `src/build/SharedDeps.zig` accepts `SDKROOT` for Darwin system headers. This
-  avoids Nix's compiler wrapper hiding the selected Xcode SDK.
+- `build.zig` installs only the internal static archive on macOS and Linux;
+  macOS does so without building an XCFramework.
+- `src/apprt/embedded.zig`, `src/renderer/OpenGL.zig`, and `include/ghostty.h`
+  expose a caller-owned OpenGL context for the Wayland host adapter.
+- `src/build/SharedDeps.zig` includes GLAD in OpenGL library artifacts and
+  accepts `SDKROOT` for Darwin system headers. This avoids Nix's compiler
+  wrapper hiding the selected Xcode SDK.

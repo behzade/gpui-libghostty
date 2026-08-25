@@ -2,19 +2,17 @@ use std::{
     ffi::{CString, c_void},
     path::PathBuf,
     ptr::NonNull,
-    time::Duration,
 };
 
 use gpui::{
-    AppContext as _, Bounds, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyDownEvent, KeyUpEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
-    Pixels, Render, ScrollDelta, ScrollWheelEvent, Styled as _, Task, Window, canvas, div,
+    AppContext as _, Bounds, ClipboardItem, Context, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement, KeyDownEvent, KeyUpEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, Styled as _, Task, Window,
+    canvas, div,
 };
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::native::{KeyAction, Modifiers, MouseButton, MouseState, NativeSurface};
-
-const TICK_INTERVAL: Duration = Duration::from_millis(8);
 
 /// Configuration for a terminal process rendered by libghostty.
 pub struct TerminalOptions {
@@ -33,7 +31,7 @@ impl TerminalOptions {
     }
 }
 
-/// A GPUI entity backed by Ghostty's native macOS Metal surface.
+/// A GPUI entity backed by Ghostty's native Metal or Wayland/OpenGL surface.
 pub struct Terminal {
     surface: NativeSurface,
     focus: FocusHandle,
@@ -98,21 +96,58 @@ impl Terminal {
             return;
         }
         self.surface.tick();
+        self.service_clipboard(cx);
+        let wakeup = self.surface.wakeup();
         let terminal = cx.entity().downgrade();
         self.tick_task = Some(cx.spawn(async move |_, cx| {
             loop {
-                cx.background_executor().timer(TICK_INTERVAL).await;
+                wakeup.wait().await;
                 let updated = terminal.update(cx, |terminal, cx| {
-                    if terminal.surface.needs_tick() {
-                        terminal.surface.tick();
-                        cx.notify();
-                    }
+                    terminal.surface.tick();
+                    terminal.service_clipboard(cx);
+                    cx.notify();
                 });
                 if updated.is_err() {
                     break;
                 }
             }
         }));
+    }
+
+    fn service_clipboard(&mut self, cx: &mut Context<Self>) {
+        if let Some(request) = self.surface.take_clipboard_read() {
+            let item = if request.selection {
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                {
+                    cx.read_from_primary()
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+                {
+                    cx.read_from_clipboard()
+                }
+            } else {
+                cx.read_from_clipboard()
+            };
+            let mut text = item.and_then(|item| item.text()).unwrap_or_default();
+            if text.contains('\0') {
+                text = text.replace('\0', "�");
+            }
+            if let Ok(text) = CString::new(text) {
+                self.surface.complete_clipboard_read(request, &text);
+            }
+        }
+
+        while let Some(write) = self.surface.take_clipboard_write() {
+            let item = ClipboardItem::new_string(write.text);
+            if write.selection {
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                cx.write_to_primary(item);
+                #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+                cx.write_to_clipboard(item);
+            } else {
+                cx.write_to_clipboard(item);
+            }
+        }
     }
 
     fn update_frame(&mut self, bounds: Bounds<Pixels>, scale_factor: f64) {
@@ -143,7 +178,7 @@ impl Terminal {
     }
 
     fn send_key(&mut self, action: KeyAction, keystroke: &gpui::Keystroke) {
-        let Some(key) = mac_key(&keystroke.key) else {
+        let Some(key) = native_key(&keystroke.key) else {
             if matches!(action, KeyAction::Press | KeyAction::Repeat)
                 && !keystroke.modifiers.control
                 && !keystroke.modifiers.alt
@@ -344,20 +379,20 @@ fn key_modifiers(
     (active, consumed)
 }
 
-struct MacKey {
+struct NativeKey {
     keycode: u32,
     unshifted_codepoint: u32,
     implied_shift: bool,
 }
 
-fn mac_key(key: &str) -> Option<MacKey> {
-    let (key, implied_shift) = unshifted_macos_key(key);
+fn native_key(key: &str) -> Option<NativeKey> {
+    let (key, implied_shift) = unshifted_key(key);
     let unshifted_codepoint = match key {
         "space" => u32::from(' '),
         _ => single_codepoint(key).map_or(0, u32::from),
     };
-    Some(MacKey {
-        keycode: mac_keycode(key)?,
+    Some(NativeKey {
+        keycode: native_keycode(key)?,
         unshifted_codepoint,
         implied_shift,
     })
@@ -369,7 +404,7 @@ fn single_codepoint(value: &str) -> Option<char> {
     chars.next().is_none().then_some(first)
 }
 
-fn unshifted_macos_key(key: &str) -> (&str, bool) {
+fn unshifted_key(key: &str) -> (&str, bool) {
     match key {
         "!" => ("1", true),
         "@" => ("2", true),
@@ -396,7 +431,8 @@ fn unshifted_macos_key(key: &str) -> (&str, bool) {
     }
 }
 
-fn mac_keycode(key: &str) -> Option<u32> {
+#[cfg(target_os = "macos")]
+fn native_keycode(key: &str) -> Option<u32> {
     // Native values mirror Ghostty's pinned macOS keycode table. GPUI does
     // not expose NSEvent.keyCode, so keys it collapses (notably the keypad)
     // cannot be distinguished here.
@@ -492,6 +528,101 @@ fn mac_keycode(key: &str) -> Option<u32> {
     })
 }
 
+#[cfg(target_os = "linux")]
+fn native_keycode(key: &str) -> Option<u32> {
+    // XKB keycodes used by Ghostty's Linux key table (evdev codes plus 8).
+    Some(match key {
+        "escape" => 9,
+        "1" => 10,
+        "2" => 11,
+        "3" => 12,
+        "4" => 13,
+        "5" => 14,
+        "6" => 15,
+        "7" => 16,
+        "8" => 17,
+        "9" => 18,
+        "0" => 19,
+        "-" => 20,
+        "=" => 21,
+        "backspace" => 22,
+        "tab" => 23,
+        "q" => 24,
+        "w" => 25,
+        "e" => 26,
+        "r" => 27,
+        "t" => 28,
+        "y" => 29,
+        "u" => 30,
+        "i" => 31,
+        "o" => 32,
+        "p" => 33,
+        "[" => 34,
+        "]" => 35,
+        "enter" | "return" => 36,
+        "a" => 38,
+        "s" => 39,
+        "d" => 40,
+        "f" => 41,
+        "g" => 42,
+        "h" => 43,
+        "j" => 44,
+        "k" => 45,
+        "l" => 46,
+        ";" => 47,
+        "'" => 48,
+        "`" => 49,
+        "\\" => 51,
+        "z" => 52,
+        "x" => 53,
+        "c" => 54,
+        "v" => 55,
+        "b" => 56,
+        "n" => 57,
+        "m" => 58,
+        "," => 59,
+        "." => 60,
+        "/" => 61,
+        "space" => 65,
+        "f1" => 67,
+        "f2" => 68,
+        "f3" => 69,
+        "f4" => 70,
+        "f5" => 71,
+        "f6" => 72,
+        "f7" => 73,
+        "f8" => 74,
+        "f9" => 75,
+        "f10" => 76,
+        "f11" => 95,
+        "f12" => 96,
+        "f13" => 191,
+        "f14" => 192,
+        "f15" => 193,
+        "f16" => 194,
+        "f17" => 195,
+        "f18" => 196,
+        "f19" => 197,
+        "f20" => 198,
+        "home" => 110,
+        "up" => 111,
+        "pageup" | "page_up" | "page-up" => 112,
+        "left" => 113,
+        "right" => 114,
+        "end" => 115,
+        "down" => 116,
+        "pagedown" | "page_down" | "page-down" => 117,
+        "insert" => 118,
+        "delete" => 119,
+        _ => return None,
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn native_keycode(_: &str) -> Option<u32> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,7 +633,7 @@ mod tests {
             "h", "j", "k", "l", "escape", "insert", "home", "pageup", "delete", "end", "pagedown",
             "left", "right", "down", "up", "f1", "f20",
         ] {
-            assert!(mac_key(key).is_some(), "missing {key}");
+            assert!(native_key(key).is_some(), "missing {key}");
         }
     }
 
@@ -531,8 +662,8 @@ mod tests {
             ("?", "/"),
             ("~", "`"),
         ] {
-            let key = mac_key(shifted).expect("shifted key should map");
-            let base = mac_key(unshifted).expect("base key should map");
+            let key = native_key(shifted).expect("shifted key should map");
+            let base = native_key(unshifted).expect("base key should map");
             let (active, consumed) =
                 key_modifiers(gpui::Modifiers::default(), key.implied_shift, true);
             assert_eq!(key.keycode, base.keycode);
@@ -545,14 +676,14 @@ mod tests {
     #[test]
     fn named_keys_do_not_leak_their_names_as_unicode() {
         assert_eq!(
-            mac_key("space")
+            native_key("space")
                 .expect("space should map")
                 .unshifted_codepoint,
             u32::from(' ')
         );
         for key in ["enter", "escape", "f1", "insert", "up"] {
             assert_eq!(
-                mac_key(key)
+                native_key(key)
                     .expect("named key should map")
                     .unshifted_codepoint,
                 0,
