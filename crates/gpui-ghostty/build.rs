@@ -6,7 +6,8 @@ use std::{
     process::Command,
 };
 
-const NATIVE_CACHE_VERSION: &str = "1";
+const NATIVE_CACHE_VERSION: &str = "2";
+const SHARED_CACHE_NAME: &str = "gpui-libghostty";
 const GHOSTTY_BUILD_OPTIONS: &[&str] = &[
     "-Dapp-runtime=none",
     "-Demit-xcframework=false",
@@ -26,6 +27,9 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/ghostty");
     println!("cargo:rerun-if-env-changed=GHOSTTY_NATIVE_CACHE_DIR");
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_PACKAGE_CACHE_DIR");
+    println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_GLOBAL_CACHE_DIR");
+    println!("cargo:rerun-if-env-changed=XDG_CACHE_HOME");
+    println!("cargo:rerun-if-env-changed=HOME");
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=ZIG");
 
@@ -64,13 +68,10 @@ fn main() {
             build_ghostty(&source, &out_dir, &prefix, &fingerprint, &tools);
         }
     }
+    install_cached_library(&library, &out_dir);
 
     compile_shim(&manifest, &source, &out_dir, &tools);
 
-    println!(
-        "cargo:rustc-link-search=native={}",
-        prefix.join("lib").display()
-    );
     println!("cargo:rustc-link-lib=static=ghostty-internal");
     println!("cargo:rustc-link-lib=c++");
     println!("cargo:rustc-link-lib=objc");
@@ -116,14 +117,11 @@ fn build_linux() {
         build_ghostty_linux(&source, &out_dir, &prefix, &fingerprint, &zig);
     }
     drop(cache_lock);
+    install_cached_library(&library, &out_dir);
 
     compile_linux_shim(&manifest, &source, &out_dir, &zig);
-    println!(
-        "cargo:rustc-link-search=native={}",
-        prefix.join("lib").display()
-    );
-    println!("cargo:rustc-link-lib=static=ghostty-internal");
     println!("cargo:rustc-link-search=native={}", out_dir.display());
+    println!("cargo:rustc-link-lib=static=ghostty-internal");
     println!("cargo:rustc-link-lib=static=gpui_ghostty_surface_linux");
     for library in ["c++", "dl", "pthread", "m"] {
         println!("cargo:rustc-link-lib={library}");
@@ -139,7 +137,7 @@ fn build_ghostty_linux(
 ) {
     let native_work = out_dir.join("native-linux");
     let build_source = native_work.join(format!("ghostty-build-source-{fingerprint}"));
-    let staging_prefix = native_work.join(format!("ghostty-prefix-{fingerprint}"));
+    let staging_prefix = prefix.with_file_name(format!(".{fingerprint}.staging"));
     for stale in [&build_source, &staging_prefix] {
         if stale.exists() {
             std::fs::remove_dir_all(stale).expect("remove stale Ghostty Linux build directory");
@@ -159,10 +157,7 @@ fn build_ghostty_linux(
 
     let status = Command::new(zig)
         .current_dir(&build_source)
-        .env(
-            "ZIG_GLOBAL_CACHE_DIR",
-            shared_target_root(out_dir).join("ghostty-zig-global-cache"),
-        )
+        .env("ZIG_GLOBAL_CACHE_DIR", zig_global_cache_dir(out_dir))
         .env("ZIG_LOCAL_CACHE_DIR", native_work.join("ghostty-zig-cache"))
         .args(["build", "--prefix"])
         .arg(&staging_prefix)
@@ -274,6 +269,8 @@ fn compile_shim(manifest: &Path, source: &Path, out_dir: &Path, tools: &NativeTo
 struct NativeTools {
     developer_dir: String,
     sdk_root: String,
+    sdk_version: String,
+    clang_version: String,
     zig: std::ffi::OsString,
 }
 
@@ -284,6 +281,16 @@ impl NativeTools {
             sdk_root: command_output(
                 "/usr/bin/xcrun",
                 &["--sdk", "macosx", "--show-sdk-path"],
+                &["DEVELOPER_DIR", "SDKROOT"],
+            ),
+            sdk_version: command_output(
+                "/usr/bin/xcrun",
+                &["--sdk", "macosx", "--show-sdk-version"],
+                &["DEVELOPER_DIR", "SDKROOT"],
+            ),
+            clang_version: command_output(
+                "/usr/bin/xcrun",
+                &["--sdk", "macosx", "clang", "--version"],
                 &["DEVELOPER_DIR", "SDKROOT"],
             ),
             zig: env::var_os("ZIG").unwrap_or_else(|| "zig".into()),
@@ -320,7 +327,7 @@ fn build_ghostty(
 ) {
     let native_work = out_dir.join("native");
     let build_source = native_work.join(format!("ghostty-build-source-{fingerprint}"));
-    let staging_prefix = native_work.join(format!("ghostty-prefix-{fingerprint}"));
+    let staging_prefix = prefix.with_file_name(format!(".{fingerprint}.staging"));
     for stale in [&build_source, &staging_prefix] {
         if stale.exists() {
             std::fs::remove_dir_all(stale).expect("remove stale Ghostty build directory");
@@ -351,10 +358,7 @@ fn build_ghostty(
         .env("AR", toolchain.join("ar"))
         .env("LD", toolchain.join("ld"))
         .env("PATH", path)
-        .env(
-            "ZIG_GLOBAL_CACHE_DIR",
-            shared_target_root(out_dir).join("ghostty-zig-global-cache"),
-        )
+        .env("ZIG_GLOBAL_CACHE_DIR", zig_global_cache_dir(out_dir))
         .env("ZIG_LOCAL_CACHE_DIR", native_work.join("ghostty-zig-cache"))
         .args(["build", "--prefix"])
         .arg(&staging_prefix)
@@ -390,6 +394,24 @@ fn cleanup_build(source: &Path, prefix: &Path) {
     let _ = std::fs::remove_dir_all(prefix);
 }
 
+fn install_cached_library(cached: &Path, out_dir: &Path) {
+    let installed = out_dir.join("libghostty-internal.a");
+    let staging = out_dir.join(format!(
+        ".libghostty-internal-{}.staging",
+        std::process::id()
+    ));
+    if staging.exists() {
+        std::fs::remove_file(&staging).expect("remove stale cached Ghostty archive link");
+    }
+    if std::fs::hard_link(cached, &staging).is_err() {
+        std::fs::copy(cached, &staging).expect("copy cached Ghostty archive into Cargo output");
+    }
+    if installed.exists() {
+        std::fs::remove_file(&installed).expect("replace cached Ghostty archive in Cargo output");
+    }
+    std::fs::rename(staging, installed).expect("install cached Ghostty archive in Cargo output");
+}
+
 fn native_fingerprint(source: &Path, tools: &NativeTools) -> String {
     let zig_version = tools
         .command(&tools.zig)
@@ -409,6 +431,8 @@ fn native_fingerprint(source: &Path, tools: &NativeTools) -> String {
     hash.write_field(&zig_version.stdout);
     hash.write_field(tools.developer_dir.as_bytes());
     hash.write_field(tools.sdk_root.as_bytes());
+    hash.write_field(tools.sdk_version.as_bytes());
+    hash.write_field(tools.clang_version.as_bytes());
     for option in GHOSTTY_BUILD_OPTIONS {
         hash.write_field(option.as_bytes());
     }
@@ -475,22 +499,80 @@ impl Fnv128 {
 }
 
 fn native_cache_root(out_dir: &Path) -> PathBuf {
-    if let Some(path) = env::var_os("GHOSTTY_NATIVE_CACHE_DIR").map(PathBuf::from) {
-        assert!(path.is_absolute(), "Ghostty native cache must be absolute");
-        return path;
-    }
-    shared_target_root(out_dir).join("gpui-ghostty-native")
+    cache_dir(
+        out_dir,
+        "GHOSTTY_NATIVE_CACHE_DIR",
+        "native",
+        "gpui-ghostty-native",
+    )
 }
 
 fn package_cache_dir(out_dir: &Path) -> PathBuf {
-    if let Some(path) = env::var_os("GHOSTTY_ZIG_PACKAGE_CACHE_DIR").map(PathBuf::from) {
-        assert!(
-            path.is_absolute(),
-            "Ghostty Zig package cache must be absolute"
-        );
+    cache_dir(
+        out_dir,
+        "GHOSTTY_ZIG_PACKAGE_CACHE_DIR",
+        "zig-pkg",
+        "ghostty-zig-pkg",
+    )
+}
+
+fn zig_global_cache_dir(out_dir: &Path) -> PathBuf {
+    cache_dir(
+        out_dir,
+        "GHOSTTY_ZIG_GLOBAL_CACHE_DIR",
+        "zig-global",
+        "ghostty-zig-global-cache",
+    )
+}
+
+fn cache_dir(out_dir: &Path, env_name: &str, shared_name: &str, target_name: &str) -> PathBuf {
+    if let Some(path) = env::var_os(env_name).map(PathBuf::from) {
+        assert!(path.is_absolute(), "{env_name} must be an absolute path");
         return path;
     }
-    shared_target_root(out_dir).join("ghostty-zig-pkg")
+
+    if let Some(root) = user_cache_root() {
+        let path = root.join(SHARED_CACHE_NAME).join(shared_name);
+        match prepare_cache_dir(&path) {
+            Ok(()) => return path,
+            Err(error) => println!(
+                "cargo:warning=cannot create shared Ghostty cache at {}: {error}; using Cargo target cache",
+                path.display()
+            ),
+        }
+    }
+
+    shared_target_root(out_dir).join(target_name)
+}
+
+fn prepare_cache_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    let write_check = path.join(format!(".write-check-{}", std::process::id()));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&write_check)?;
+    drop(file);
+    std::fs::remove_file(write_check)?;
+    Ok(())
+}
+
+fn user_cache_root() -> Option<PathBuf> {
+    if let Some(path) = env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        return Some(path);
+    }
+
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())?;
+    if cfg!(target_os = "macos") {
+        Some(home.join("Library/Caches"))
+    } else {
+        Some(home.join(".cache"))
+    }
 }
 
 fn shared_target_root(out_dir: &Path) -> PathBuf {

@@ -33,6 +33,19 @@ with the package.
 Set `ZIG` to select a non-default Zig executable. Set `GPUI_NVIM` or assign
 `NvimOptions::executable` to select Neovim.
 
+## Native build cache
+
+The first build compiles Ghostty with Zig. Later builds reuse the native archive
+across Cargo workspaces. The default cache is
+`$XDG_CACHE_HOME/gpui-libghostty`, `$HOME/Library/Caches/gpui-libghostty` on
+macOS, or `$HOME/.cache/gpui-libghostty` on other systems. If the shared cache
+cannot be created, the build falls back to the current Cargo target directory.
+
+Set `GHOSTTY_NATIVE_CACHE_DIR`, `GHOSTTY_ZIG_PACKAGE_CACHE_DIR`, or
+`GHOSTTY_ZIG_GLOBAL_CACHE_DIR` to absolute paths to override each cache. The
+native cache key includes the Ghostty source, target, Zig version, SDK, and
+build options, so a changed input gets a new archive.
+
 ## Terminal
 
 ```toml
