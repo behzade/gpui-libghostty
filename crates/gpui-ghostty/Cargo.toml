@@ -8,12 +8,6 @@ license.workspace = true
 repository.workspace = true
 readme = "../../README.md"
 build = "build.rs"
-exclude = [
-    "vendor/ghostty/src/crash/testdata/**",
-    "vendor/ghostty/src/font/res/NotoColorEmoji.ttf",
-    "vendor/ghostty/src/font/res/NotoEmoji-Regular.ttf",
-    "vendor/ghostty/src/terminal/kitty/testdata/**",
-]
 
 [dependencies]
 async-channel.workspace = true
