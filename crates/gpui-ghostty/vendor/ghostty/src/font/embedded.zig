@@ -17,7 +17,3 @@ pub const regular = @embedFile("jetbrains_mono_regular");
 pub const bold = @embedFile("jetbrains_mono_bold");
 pub const italic = @embedFile("jetbrains_mono_italic");
 pub const bold_italic = @embedFile("jetbrains_mono_bold_italic");
-
-/// Emoji fonts
-pub const emoji = @embedFile("res/NotoColorEmoji.ttf");
-pub const emoji_text = @embedFile("res/NotoEmoji-Regular.ttf");

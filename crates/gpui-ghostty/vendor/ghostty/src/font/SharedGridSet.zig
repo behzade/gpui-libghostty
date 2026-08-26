@@ -372,39 +372,6 @@ fn collection(
         }
     }
 
-    // Emoji fallback. We don't include this on Mac since Mac is expected
-    // to always have the Apple Emoji available on the system.
-    if (comptime !builtin.target.os.tag.isDarwin() or Discover == void) {
-        _ = try c.add(
-            self.alloc,
-            try .init(
-                self.font_lib,
-                font.embedded.emoji,
-                load_options.faceOptions(),
-            ),
-            .{
-                .style = .regular,
-                .fallback = true,
-                // No size adjustment for emojis.
-                .size_adjustment = .none,
-            },
-        );
-        _ = try c.add(
-            self.alloc,
-            try .init(
-                self.font_lib,
-                font.embedded.emoji_text,
-                load_options.faceOptions(),
-            ),
-            .{
-                .style = .regular,
-                .fallback = true,
-                // No size adjustment for emojis.
-                .size_adjustment = .none,
-            },
-        );
-    }
-
     return c;
 }
 
