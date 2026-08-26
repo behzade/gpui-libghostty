@@ -60,8 +60,8 @@ impl Terminal {
             native_window.display,
             native_window.surface,
             f64::from(window.scale_factor()),
-            &working_directory,
-            &command,
+            working_directory,
+            command,
         )
         .map_err(|error| format!("initialize libghostty: {error}"))?;
         let focus = cx.focus_handle();

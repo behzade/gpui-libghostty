@@ -1,5 +1,5 @@
 use std::{
-    ffi::{CStr, c_char, c_int, c_void},
+    ffi::{CStr, CString, c_char, c_int, c_void},
     ptr::NonNull,
 };
 
@@ -89,6 +89,8 @@ pub struct NativeSurface {
     raw: NonNull<RawSurface>,
     platform: Box<WaylandGlSurface>,
     wakeup: NativeWakeup,
+    _working_directory: CString,
+    _command: CString,
 }
 
 impl NativeSurface {
@@ -96,8 +98,8 @@ impl NativeSurface {
         display: Option<NonNull<c_void>>,
         parent_surface: NonNull<c_void>,
         scale_factor: f64,
-        working_directory: &CStr,
-        command: &CStr,
+        working_directory: CString,
+        command: CString,
     ) -> Result<Self, String> {
         let display = display.ok_or_else(|| "Wayland display handle is unavailable".to_owned())?;
         let wakeup = NativeWakeup::new();
@@ -125,6 +127,8 @@ impl NativeSurface {
             raw,
             platform,
             wakeup,
+            _working_directory: working_directory,
+            _command: command,
         })
     }
 

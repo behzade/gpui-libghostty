@@ -1,6 +1,10 @@
 //! Safe, narrow Rust ownership wrappers for Ghostty's native render surfaces.
 
-use std::{ffi::c_void, ptr::NonNull, sync::Arc};
+use std::{
+    ffi::{CString, c_void},
+    ptr::NonNull,
+    sync::Arc,
+};
 
 #[cfg(not(target_os = "linux"))]
 use std::ffi::CStr;
@@ -113,6 +117,8 @@ mod platform {
     pub struct NativeSurface {
         raw: NonNull<RawSurface>,
         wakeup: NativeWakeup,
+        _working_directory: CString,
+        _command: CString,
         _main_thread: PhantomData<Rc<()>>,
     }
 
@@ -125,8 +131,8 @@ mod platform {
             _display: Option<NonNull<c_void>>,
             parent_view: NonNull<c_void>,
             _scale_factor: f64,
-            working_directory: &CStr,
-            command: &CStr,
+            working_directory: CString,
+            command: CString,
         ) -> Result<Self, &'static str> {
             let wakeup = NativeWakeup::new();
             // SAFETY: The C shim validates creation failures. The parent pointer and
@@ -144,6 +150,8 @@ mod platform {
             Ok(Self {
                 raw,
                 wakeup,
+                _working_directory: working_directory,
+                _command: command,
                 _main_thread: PhantomData,
             })
         }
@@ -278,8 +286,8 @@ impl NativeSurface {
         _display: Option<NonNull<c_void>>,
         _parent_view: NonNull<c_void>,
         _scale_factor: f64,
-        _working_directory: &CStr,
-        _command: &CStr,
+        _working_directory: CString,
+        _command: CString,
     ) -> Result<Self, &'static str> {
         Err("libghostty native surfaces require macOS or Wayland")
     }
