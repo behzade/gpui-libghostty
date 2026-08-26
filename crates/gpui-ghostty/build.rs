@@ -199,6 +199,8 @@ fn compile_linux_shim(manifest: &Path, source: &Path, out_dir: &Path, zig: &OsSt
     let object = out_dir.join("ghostty_surface_linux.o");
     let library = out_dir.join("libgpui_ghostty_surface_linux.a");
     let status = Command::new(zig)
+        .env("ZIG_GLOBAL_CACHE_DIR", zig_global_cache_dir(out_dir))
+        .env("ZIG_LOCAL_CACHE_DIR", out_dir.join("linux-shim-zig-cache"))
         .args(["cc", "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-c", "-I"])
         .arg(source.join("include"))
         .arg(manifest.join("shim/ghostty_surface_linux.c"))

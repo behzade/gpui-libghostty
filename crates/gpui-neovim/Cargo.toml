@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 gpui.workspace = true
-gpui-ghostty = { package = "gpui-libghostty", version = "0.1.6", path = "../gpui-ghostty" }
+gpui-ghostty = { package = "gpui-libghostty", version = "0.1.7", path = "../gpui-ghostty" }
 wait-timeout.workspace = true
 
 [lints]
