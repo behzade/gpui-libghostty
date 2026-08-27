@@ -48,6 +48,52 @@ unsafe extern "C" fn native_wakeup(userdata: *mut c_void) {
     let _ = unsafe { sender.as_ref() }.try_send(());
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct NativeFrame {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    scale_factor: f64,
+}
+
+impl NativeFrame {
+    fn new(x: f64, y: f64, width: f64, height: f64, scale_factor: f64) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+            scale_factor,
+        }
+    }
+}
+
+#[derive(Default)]
+struct NativeSurfaceState {
+    frame: Option<NativeFrame>,
+    visible: bool,
+}
+
+impl NativeSurfaceState {
+    fn frame_changed(&self, frame: NativeFrame) -> bool {
+        self.frame != Some(frame)
+    }
+
+    fn commit_visible_frame(&mut self, frame: NativeFrame) {
+        self.frame = Some(frame);
+        self.visible = true;
+    }
+
+    fn update_visibility(&mut self, visible: bool) -> bool {
+        if self.visible == visible {
+            return false;
+        }
+        self.visible = visible;
+        true
+    }
+}
+
 #[cfg(target_os = "macos")]
 use std::{
     ffi::{c_char, c_int},
@@ -117,6 +163,7 @@ mod platform {
     pub struct NativeSurface {
         raw: NonNull<RawSurface>,
         wakeup: NativeWakeup,
+        state: NativeSurfaceState,
         _working_directory: CString,
         _command: CString,
         _main_thread: PhantomData<Rc<()>>,
@@ -150,6 +197,7 @@ mod platform {
             Ok(Self {
                 raw,
                 wakeup,
+                state: NativeSurfaceState::default(),
                 _working_directory: working_directory,
                 _command: command,
                 _main_thread: PhantomData,
@@ -170,14 +218,22 @@ mod platform {
             unsafe { gpui_ghostty_surface_is_alive(self.raw.as_ptr()) }
         }
 
-        pub fn set_frame(&mut self, x: f64, y: f64, width: f64, height: f64, _scale_factor: f64) {
+        pub fn set_frame(&mut self, x: f64, y: f64, width: f64, height: f64, scale_factor: f64) {
+            let frame = NativeFrame::new(x, y, width, height, scale_factor);
+            if !self.state.frame_changed(frame) {
+                self.set_visible(true);
+                return;
+            }
             // SAFETY: `raw` is valid and geometry values cross the C boundary by value.
             unsafe { gpui_ghostty_surface_set_frame(self.raw.as_ptr(), x, y, width, height) }
+            self.state.commit_visible_frame(frame);
         }
 
         pub fn set_visible(&mut self, visible: bool) {
-            // SAFETY: `raw` is valid and this is called from the AppKit main thread.
-            unsafe { gpui_ghostty_surface_set_visible(self.raw.as_ptr(), visible) }
+            if self.state.update_visibility(visible) {
+                // SAFETY: `raw` is valid and this is called from the AppKit main thread.
+                unsafe { gpui_ghostty_surface_set_visible(self.raw.as_ptr(), visible) }
+            }
         }
 
         pub fn set_focus(&mut self, focused: bool) {

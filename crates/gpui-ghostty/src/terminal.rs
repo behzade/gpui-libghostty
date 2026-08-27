@@ -103,9 +103,10 @@ impl Terminal {
             loop {
                 wakeup.wait().await;
                 let updated = terminal.update(cx, |terminal, cx| {
+                    // Ghostty draws its native child during the tick; GPUI has no
+                    // terminal pixels to repaint for this wakeup.
                     terminal.surface.tick();
                     terminal.service_clipboard(cx);
-                    cx.notify();
                 });
                 if updated.is_err() {
                     break;
@@ -159,7 +160,6 @@ impl Terminal {
             f64::from(f32::from(bounds.size.height)),
             scale_factor,
         );
-        self.surface.set_visible(true);
     }
 
     fn key_down(&mut self, event: &KeyDownEvent) {

@@ -5,8 +5,8 @@ use std::{
 
 use super::wayland::WaylandGlSurface;
 use super::{
-    ClipboardRead, ClipboardWrite, KeyAction, Modifiers, MouseButton, MouseState, NativeWakeup,
-    native_wakeup,
+    ClipboardRead, ClipboardWrite, KeyAction, Modifiers, MouseButton, MouseState, NativeFrame,
+    NativeSurfaceState, NativeWakeup, native_wakeup,
 };
 
 #[repr(C)]
@@ -89,6 +89,7 @@ pub struct NativeSurface {
     raw: NonNull<RawSurface>,
     platform: Box<WaylandGlSurface>,
     wakeup: NativeWakeup,
+    state: NativeSurfaceState,
     _working_directory: CString,
     _command: CString,
 }
@@ -127,6 +128,7 @@ impl NativeSurface {
             raw,
             platform,
             wakeup,
+            state: NativeSurfaceState::default(),
             _working_directory: working_directory,
             _command: command,
         })
@@ -147,6 +149,11 @@ impl NativeSurface {
     }
 
     pub fn set_frame(&mut self, x: f64, y: f64, width: f64, height: f64, scale_factor: f64) {
+        let frame = NativeFrame::new(x, y, width, height, scale_factor);
+        if !self.state.frame_changed(frame) {
+            self.set_visible(true);
+            return;
+        }
         let Ok((physical_width, physical_height)) = self.platform.resize(
             x.round() as i32,
             y.round() as i32,
@@ -154,8 +161,11 @@ impl NativeSurface {
             height.round() as i32,
             scale_factor,
         ) else {
+            self.set_visible(true);
             return;
         };
+        // Match AppKit setFrame: reveal the native child before its refresh can draw.
+        self.platform.set_visible(true);
         // SAFETY: Geometry and context updates completed before Ghostty observes the size.
         unsafe {
             gpui_ghostty_surface_linux_set_size(
@@ -165,11 +175,14 @@ impl NativeSurface {
                 self.platform.scale(),
             )
         }
+        self.state.commit_visible_frame(frame);
     }
 
     pub fn set_visible(&mut self, visible: bool) {
-        self.platform.set_visible(visible);
-        unsafe { gpui_ghostty_surface_linux_set_visible(self.raw.as_ptr(), visible) }
+        if self.state.update_visibility(visible) {
+            self.platform.set_visible(visible);
+            unsafe { gpui_ghostty_surface_linux_set_visible(self.raw.as_ptr(), visible) }
+        }
     }
 
     pub fn set_focus(&mut self, focused: bool) {
