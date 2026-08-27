@@ -103,27 +103,6 @@ GPUI is pinned to Zed commit `cc053a4a6fa2fd0e8793201ed9099466af1be0b1`.
 Consumers using another GPUI source should patch that dependency consistently
 so entity and event types remain identical.
 
-## Releasing
-
-The crates have independent versions. Install
-[`cargo-release`](https://github.com/crate-ci/cargo-release), then release from
-a clean, up-to-date `main` branch:
-
-```sh
-cargo release -p gpui-libghostty patch           # preview
-cargo release -p gpui-libghostty patch --execute
-```
-
-Use `gpui-neovim` for the other crate, or replace `patch` with `minor`, `major`,
-or an explicit version. `cargo-release` updates and verifies the package,
-commits the version, and pushes a `<crate>-v<version>` tag. The tag triggers
-`.github/workflows/release.yml`, which checks the manifest version and publishes
-that crate.
-
-Publishing uses crates.io trusted publishing. Configure `behzade/gpui-libghostty`
-and workflow `release.yml` as a trusted publisher for each crate. A crate's
-first release must be published manually before crates.io allows that setup.
-
 ## License
 
 The workspace is MIT-licensed. Vendored Ghostty remains MIT-licensed; see
