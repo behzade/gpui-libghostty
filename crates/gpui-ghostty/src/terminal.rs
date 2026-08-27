@@ -2,13 +2,14 @@ use std::{
     ffi::{CString, c_void},
     path::PathBuf,
     ptr::NonNull,
+    sync::Arc,
 };
 
 use gpui::{
     AppContext as _, Bounds, ClipboardItem, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, KeyDownEvent, KeyUpEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, Render, ScrollDelta, ScrollWheelEvent, Styled as _, Task, Window,
-    canvas, div,
+    ParentElement as _, Pixels, Render, RenderImage, ScrollDelta, ScrollWheelEvent, Styled as _,
+    Task, Window, canvas, div,
 };
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
@@ -89,6 +90,21 @@ impl Terminal {
     pub fn set_visible(&mut self, visible: bool) {
         self.surface.set_visible(visible);
         self.surface.set_focus(visible);
+    }
+
+    /// Captures the last completed native frame for temporary GPUI compositing.
+    ///
+    /// This performs a synchronous GPU readback and should only be used for
+    /// infrequent transitions such as presenting a modal over the terminal.
+    /// Render the image at the terminal's logical bounds because its pixels use
+    /// the native surface's display scale.
+    pub fn snapshot(&mut self) -> Result<Arc<RenderImage>, String> {
+        let snapshot = self.surface.snapshot()?;
+        let image = image::RgbaImage::from_raw(snapshot.width, snapshot.height, snapshot.bgra)
+            .ok_or_else(|| "native terminal snapshot has an invalid byte length".to_owned())?;
+        Ok(Arc::new(RenderImage::new(smallvec::smallvec![
+            image::Frame::new(image)
+        ])))
     }
 
     fn start_ticking(&mut self, cx: &mut Context<Self>) {

@@ -1375,10 +1375,12 @@ version = "0.1.10"
 dependencies = [
  "async-channel",
  "gpui",
+ "image",
  "khronos-egl",
  "libc",
  "libloading",
  "raw-window-handle",
+ "smallvec",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",

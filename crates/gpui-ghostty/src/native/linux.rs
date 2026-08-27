@@ -6,7 +6,7 @@ use std::{
 use super::wayland::WaylandGlSurface;
 use super::{
     ClipboardRead, ClipboardWrite, KeyAction, Modifiers, MouseButton, MouseState, NativeFrame,
-    NativeSurfaceState, NativeWakeup, native_wakeup,
+    NativeSnapshot, NativeSurfaceState, NativeWakeup, native_wakeup,
 };
 
 #[repr(C)]
@@ -29,6 +29,14 @@ unsafe extern "C" {
     fn gpui_ghostty_surface_linux_free(surface: *mut RawSurface);
     fn gpui_ghostty_surface_linux_tick(surface: *mut RawSurface);
     fn gpui_ghostty_surface_linux_is_alive(surface: *const RawSurface) -> bool;
+    fn gpui_ghostty_surface_linux_snapshot(
+        surface: *mut RawSurface,
+        pixels: *mut *mut u8,
+        width: *mut u32,
+        height: *mut u32,
+        length: *mut usize,
+    ) -> bool;
+    fn gpui_ghostty_surface_linux_snapshot_free(pixels: *mut u8);
     fn gpui_ghostty_surface_linux_take_clipboard_read(
         surface: *mut RawSurface,
         selection: *mut bool,
@@ -146,6 +154,32 @@ impl NativeSurface {
 
     pub fn is_alive(&self) -> bool {
         unsafe { gpui_ghostty_surface_linux_is_alive(self.raw.as_ptr()) }
+    }
+
+    pub fn snapshot(&mut self) -> Result<NativeSnapshot, String> {
+        let mut pixels = std::ptr::null_mut();
+        let mut width = 0;
+        let mut height = 0;
+        let mut length = 0;
+        // SAFETY: The shim initializes all outputs and returns a malloc-owned
+        // buffer which remains valid until the matching free call below.
+        let captured = unsafe {
+            gpui_ghostty_surface_linux_snapshot(
+                self.raw.as_ptr(),
+                &mut pixels,
+                &mut width,
+                &mut height,
+                &mut length,
+            )
+        };
+        if !captured {
+            return Err("capture native terminal frame".to_owned());
+        }
+        // SAFETY: A successful shim call returns `length` readable bytes in `pixels`.
+        let result = unsafe { NativeSnapshot::copy_from_raw(pixels, width, height, length, true) };
+        // SAFETY: `pixels` is either null or the allocation returned by the shim.
+        unsafe { gpui_ghostty_surface_linux_snapshot_free(pixels) }
+        result
     }
 
     pub fn set_frame(&mut self, x: f64, y: f64, width: f64, height: f64, scale_factor: f64) {

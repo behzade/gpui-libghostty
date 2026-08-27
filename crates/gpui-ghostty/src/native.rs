@@ -75,6 +75,61 @@ struct NativeSurfaceState {
     visible: bool,
 }
 
+pub(crate) struct NativeSnapshot {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) bgra: Vec<u8>,
+}
+
+impl NativeSnapshot {
+    unsafe fn copy_from_raw(
+        pixels: *const u8,
+        width: u32,
+        height: u32,
+        length: usize,
+        bottom_up: bool,
+    ) -> Result<Self, String> {
+        let row_length = usize::try_from(width)
+            .ok()
+            .filter(|width| *width > 0)
+            .and_then(|width| width.checked_mul(4));
+        let expected = row_length.and_then(|row| {
+            usize::try_from(height)
+                .ok()
+                .filter(|height| *height > 0)
+                .and_then(|height| row.checked_mul(height))
+        });
+        let (Some(pixels), Some(row_length), Some(expected)) =
+            (NonNull::new(pixels.cast_mut()), row_length, expected)
+        else {
+            return Err("native terminal snapshot has invalid dimensions".to_owned());
+        };
+        if expected != length {
+            return Err("native terminal snapshot has invalid dimensions".to_owned());
+        }
+
+        // SAFETY: The caller guarantees that `pixels` references `length` readable bytes.
+        let mut bgra = unsafe { std::slice::from_raw_parts(pixels.as_ptr(), length) }.to_vec();
+        if bottom_up {
+            flip_bgra_rows(&mut bgra, row_length);
+        }
+        Ok(Self {
+            width,
+            height,
+            bgra,
+        })
+    }
+}
+
+fn flip_bgra_rows(pixels: &mut [u8], row_length: usize) {
+    let rows = pixels.len() / row_length;
+    for row in 0..rows / 2 {
+        let opposite = rows - row - 1;
+        let (before, after) = pixels.split_at_mut(opposite * row_length);
+        before[row * row_length..(row + 1) * row_length].swap_with_slice(&mut after[..row_length]);
+    }
+}
+
 impl NativeSurfaceState {
     fn frame_changed(&self, frame: NativeFrame) -> bool {
         self.frame != Some(frame)
@@ -121,6 +176,14 @@ mod platform {
         fn gpui_ghostty_surface_free(surface: *mut RawSurface);
         fn gpui_ghostty_surface_tick(surface: *mut RawSurface);
         fn gpui_ghostty_surface_is_alive(surface: *const RawSurface) -> bool;
+        fn gpui_ghostty_surface_snapshot(
+            surface: *mut RawSurface,
+            pixels: *mut *mut u8,
+            width: *mut u32,
+            height: *mut u32,
+            length: *mut usize,
+        ) -> bool;
+        fn gpui_ghostty_surface_snapshot_free(pixels: *mut u8);
         fn gpui_ghostty_surface_set_frame(
             surface: *mut RawSurface,
             x: f64,
@@ -216,6 +279,33 @@ mod platform {
         pub fn is_alive(&self) -> bool {
             // SAFETY: `raw` remains valid for this value's lifetime.
             unsafe { gpui_ghostty_surface_is_alive(self.raw.as_ptr()) }
+        }
+
+        pub fn snapshot(&mut self) -> Result<NativeSnapshot, String> {
+            let mut pixels = std::ptr::null_mut();
+            let mut width = 0;
+            let mut height = 0;
+            let mut length = 0;
+            // SAFETY: The shim initializes all outputs and returns a malloc-owned
+            // buffer which remains valid until the matching free call below.
+            let captured = unsafe {
+                gpui_ghostty_surface_snapshot(
+                    self.raw.as_ptr(),
+                    &mut pixels,
+                    &mut width,
+                    &mut height,
+                    &mut length,
+                )
+            };
+            if !captured {
+                return Err("capture native terminal frame".to_owned());
+            }
+            // SAFETY: A successful shim call returns `length` readable bytes in `pixels`.
+            let result =
+                unsafe { NativeSnapshot::copy_from_raw(pixels, width, height, length, false) };
+            // SAFETY: `pixels` is either null or the allocation returned by the shim.
+            unsafe { gpui_ghostty_surface_snapshot_free(pixels) }
+            result
         }
 
         pub fn set_frame(&mut self, x: f64, y: f64, width: f64, height: f64, scale_factor: f64) {
@@ -354,6 +444,9 @@ impl NativeSurface {
     pub fn tick(&mut self) {}
     pub fn is_alive(&self) -> bool {
         false
+    }
+    pub fn snapshot(&mut self) -> Result<NativeSnapshot, String> {
+        Err("native terminal snapshots require macOS or Wayland".to_owned())
     }
     pub fn set_frame(&mut self, _x: f64, _y: f64, _width: f64, _height: f64, _scale_factor: f64) {}
     pub fn set_visible(&mut self, _visible: bool) {}

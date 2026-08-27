@@ -1,4 +1,6 @@
 #import <AppKit/AppKit.h>
+#import <CoreVideo/CoreVideo.h>
+#import <IOSurface/IOSurface.h>
 #import <stdatomic.h>
 #import <stdlib.h>
 #import <string.h>
@@ -188,6 +190,61 @@ void gpui_ghostty_surface_tick(gpui_ghostty_surface *state) {
 bool gpui_ghostty_surface_is_alive(const gpui_ghostty_surface *state) {
     return state != NULL && atomic_load_explicit(&state->alive, memory_order_acquire)
         && !ghostty_surface_process_exited(state->surface);
+}
+
+bool gpui_ghostty_surface_snapshot(
+    gpui_ghostty_surface *state,
+    uint8_t **pixels,
+    uint32_t *width,
+    uint32_t *height,
+    size_t *length
+) {
+    if (pixels == NULL || width == NULL || height == NULL || length == NULL) return false;
+    *pixels = NULL;
+    *width = 0;
+    *height = 0;
+    *length = 0;
+    if (state == NULL || state->view == nil) return false;
+
+    id contents = state->view.layer.contents;
+    if (contents == nil || CFGetTypeID((CFTypeRef)contents) != IOSurfaceGetTypeID()) return false;
+    IOSurfaceRef surface = (IOSurfaceRef)contents;
+    CFRetain(surface);
+    if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != kIOReturnSuccess) {
+        CFRelease(surface);
+        return false;
+    }
+
+    size_t surface_width = IOSurfaceGetWidth(surface);
+    size_t surface_height = IOSurfaceGetHeight(surface);
+    OSType pixel_format = IOSurfaceGetPixelFormat(surface);
+    size_t source_stride = IOSurfaceGetBytesPerRow(surface);
+    const uint8_t *source = IOSurfaceGetBaseAddress(surface);
+    bool valid = pixel_format == kCVPixelFormatType_32BGRA && surface_width > 0 &&
+        surface_height > 0 && source != NULL && surface_width <= UINT32_MAX &&
+        surface_height <= UINT32_MAX &&
+        surface_width <= SIZE_MAX / 4 && surface_height <= SIZE_MAX / (surface_width * 4) &&
+        source_stride >= surface_width * 4;
+    size_t destination_stride = valid ? surface_width * 4 : 0;
+    size_t byte_length = valid ? destination_stride * surface_height : 0;
+    uint8_t *copy = valid ? malloc(byte_length) : NULL;
+    if (copy != NULL) {
+        for (size_t row = 0; row < surface_height; row++) {
+            memcpy(copy + row * destination_stride, source + row * source_stride, destination_stride);
+        }
+        *pixels = copy;
+        *width = (uint32_t)surface_width;
+        *height = (uint32_t)surface_height;
+        *length = byte_length;
+    }
+
+    IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
+    CFRelease(surface);
+    return copy != NULL;
+}
+
+void gpui_ghostty_surface_snapshot_free(uint8_t *pixels) {
+    free(pixels);
 }
 
 void gpui_ghostty_surface_set_frame(

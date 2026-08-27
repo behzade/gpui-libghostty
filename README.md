@@ -79,7 +79,9 @@ let terminal = Terminal::spawn(
 ```
 
 `Terminal::spawn` returns `Entity<Terminal>`, which can be rendered directly as
-a GPUI child.
+a GPUI child. `Terminal::snapshot` performs a one-shot GPU readback and returns
+a `gpui::RenderImage`; render it at the terminal's logical bounds when temporarily
+replacing the native surface beneath a normal GPUI overlay.
 
 ## Neovim
 

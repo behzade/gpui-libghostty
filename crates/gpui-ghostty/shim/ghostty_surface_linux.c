@@ -1,4 +1,5 @@
 #include <dlfcn.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -26,6 +27,8 @@ typedef struct gpui_ghostty_surface {
     ghostty_clipboard_e clipboard_location;
     char *clipboard_write;
     ghostty_clipboard_e clipboard_write_location;
+    uint32_t width;
+    uint32_t height;
     _Atomic bool alive;
 } gpui_ghostty_surface;
 
@@ -35,6 +38,26 @@ static void *egl_library;
 static void *gl_library;
 typedef void (*egl_proc)(void);
 typedef egl_proc (*egl_get_proc_address_fn)(const char *name);
+typedef void (*gl_pixel_store_i_fn)(unsigned int name, int value);
+typedef void (*gl_read_buffer_fn)(unsigned int buffer);
+typedef void (*gl_read_pixels_fn)(
+    int x,
+    int y,
+    int width,
+    int height,
+    unsigned int format,
+    unsigned int type,
+    void *pixels
+);
+typedef unsigned int (*gl_get_error_fn)(void);
+
+enum {
+    GPUI_GL_BACK = 0x0405,
+    GPUI_GL_PACK_ALIGNMENT = 0x0D05,
+    GPUI_GL_BGRA = 0x80E1,
+    GPUI_GL_UNSIGNED_BYTE = 0x1401,
+};
+
 static egl_get_proc_address_fn egl_get_proc_address;
 
 static void initialize_ghostty(void) {
@@ -232,6 +255,76 @@ bool gpui_ghostty_surface_linux_is_alive(const gpui_ghostty_surface *state) {
         !ghostty_surface_process_exited(state->surface);
 }
 
+bool gpui_ghostty_surface_linux_snapshot(
+    gpui_ghostty_surface *state,
+    uint8_t **pixels,
+    uint32_t *width,
+    uint32_t *height,
+    size_t *length
+) {
+    if (pixels == NULL || width == NULL || height == NULL || length == NULL) return false;
+    *pixels = NULL;
+    *width = 0;
+    *height = 0;
+    *length = 0;
+    if (state == NULL || state->surface == NULL || state->width == 0 || state->height == 0 ||
+        state->width > INT_MAX || state->height > INT_MAX) {
+        return false;
+    }
+
+    gl_pixel_store_i_fn pixel_store = NULL;
+    gl_read_buffer_fn read_buffer = NULL;
+    gl_read_pixels_fn read_pixels = NULL;
+    gl_get_error_fn get_error = NULL;
+    egl_proc symbol = opengl_get_proc_address("glPixelStorei");
+    memcpy(&pixel_store, &symbol, sizeof(pixel_store));
+    symbol = opengl_get_proc_address("glReadBuffer");
+    memcpy(&read_buffer, &symbol, sizeof(read_buffer));
+    symbol = opengl_get_proc_address("glReadPixels");
+    memcpy(&read_pixels, &symbol, sizeof(read_pixels));
+    symbol = opengl_get_proc_address("glGetError");
+    memcpy(&get_error, &symbol, sizeof(get_error));
+    if (pixel_store == NULL || read_buffer == NULL || read_pixels == NULL || get_error == NULL) {
+        return false;
+    }
+
+    size_t byte_length = (size_t)state->width * state->height * 4;
+    uint8_t *copy = malloc(byte_length);
+    if (copy == NULL || !state->make_current(state->platform_userdata)) {
+        free(copy);
+        return false;
+    }
+    ghostty_surface_draw(state->surface);
+    while (get_error() != 0) {}
+    pixel_store(GPUI_GL_PACK_ALIGNMENT, 1);
+    read_buffer(GPUI_GL_BACK);
+    read_pixels(
+        0,
+        0,
+        (int)state->width,
+        (int)state->height,
+        GPUI_GL_BGRA,
+        GPUI_GL_UNSIGNED_BYTE,
+        copy
+    );
+    unsigned int error = get_error();
+    state->clear_current(state->platform_userdata);
+    if (error != 0) {
+        free(copy);
+        return false;
+    }
+
+    *pixels = copy;
+    *width = state->width;
+    *height = state->height;
+    *length = byte_length;
+    return true;
+}
+
+void gpui_ghostty_surface_linux_snapshot_free(uint8_t *pixels) {
+    free(pixels);
+}
+
 void *gpui_ghostty_surface_linux_take_clipboard_read(
     gpui_ghostty_surface *state,
     bool *selection
@@ -275,6 +368,8 @@ void gpui_ghostty_surface_linux_set_size(
     double scale_factor
 ) {
     if (state == NULL || state->surface == NULL || width == 0 || height == 0) return;
+    state->width = width;
+    state->height = height;
     ghostty_surface_set_content_scale(state->surface, scale_factor, scale_factor);
     ghostty_surface_set_size(state->surface, width, height);
     ghostty_surface_set_occlusion(state->surface, true);

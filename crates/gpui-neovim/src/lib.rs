@@ -4,11 +4,14 @@ use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
-use gpui::{App, Context, Entity, IntoElement, Render, Window};
+use gpui::{App, Context, Entity, IntoElement, Render, RenderImage, Window};
 use gpui_ghostty::{Terminal, TerminalOptions};
 use wait_timeout::ChildExt as _;
 
@@ -96,6 +99,11 @@ impl NvimEditor {
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         self.terminal
             .update(cx, |terminal, _| terminal.set_visible(visible));
+    }
+
+    /// Captures Neovim's last completed native frame for temporary GPUI compositing.
+    pub fn snapshot(&mut self, cx: &mut Context<Self>) -> Result<Arc<RenderImage>, String> {
+        self.terminal.update(cx, |terminal, _| terminal.snapshot())
     }
 
     /// Opens `path` in the existing Neovim server rather than spawning another editor.
