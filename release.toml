@@ -1,0 +1,12 @@
+# cargo-release prepares the immutable release commit and tag. GitHub Actions
+# owns crates.io publishing so releases do not require a long-lived local token.
+publish = false
+push = true
+tag = true
+verify = true
+
+# This workspace versions and releases its crates independently.
+tag-name = "{{crate_name}}-v{{version}}"
+tag-message = "{{crate_name}} v{{version}}"
+pre-release-commit-message = "chore(release): {{crate_name}} v{{version}}"
+allow-branch = ["main"]
