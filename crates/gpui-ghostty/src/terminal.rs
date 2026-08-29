@@ -1,5 +1,7 @@
 use std::{
     ffi::{CString, c_void},
+    fmt,
+    io::Write as _,
     path::PathBuf,
     ptr::NonNull,
     sync::Arc,
@@ -15,11 +17,68 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::native::{KeyAction, Modifiers, MouseButton, MouseState, NativeSurface};
 
+/// An opaque terminal color without an alpha channel.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl TerminalColor {
+    pub const fn new(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b }
+    }
+}
+
+impl fmt::Display for TerminalColor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{:02x}{:02x}{:02x}", self.r, self.g, self.b)
+    }
+}
+
+/// Colors applied to a terminal before its process starts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalTheme {
+    pub background: TerminalColor,
+    pub foreground: TerminalColor,
+    pub palette: [TerminalColor; 16],
+}
+
+impl TerminalTheme {
+    pub const fn new(
+        background: TerminalColor,
+        foreground: TerminalColor,
+        palette: [TerminalColor; 16],
+    ) -> Self {
+        Self {
+            background,
+            foreground,
+            palette,
+        }
+    }
+}
+
+/// Selects the source of terminal configuration.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum TerminalConfiguration {
+    /// Use Ghostty's built-in defaults without reading user configuration.
+    #[default]
+    Default,
+    /// Load Ghostty's default and recursively referenced user configuration files.
+    UserDefault,
+    /// Use built-in defaults with application-supplied colors.
+    Custom(TerminalTheme),
+    /// Load user configuration, then override its colors with application values.
+    UserDefaultWithOverride(TerminalTheme),
+}
+
 /// Configuration for a terminal process rendered by libghostty.
 pub struct TerminalOptions {
     pub command: String,
     pub working_directory: PathBuf,
     pub focus_on_spawn: bool,
+    pub configuration: TerminalConfiguration,
 }
 
 impl TerminalOptions {
@@ -28,8 +87,30 @@ impl TerminalOptions {
             command: command.into(),
             working_directory: working_directory.into(),
             focus_on_spawn: true,
+            configuration: TerminalConfiguration::Default,
         }
     }
+}
+
+fn theme_config_contents(theme: &TerminalTheme) -> String {
+    let palette = theme
+        .palette
+        .iter()
+        .enumerate()
+        .map(|(index, color)| format!("palette = {index}=#{color}\n"))
+        .collect::<String>();
+    format!(
+        "background = #{}\nforeground = #{}\n{}palette-generate = true\n",
+        theme.background, theme.foreground, palette
+    )
+}
+
+fn write_theme_config(theme: &TerminalTheme) -> Result<tempfile::NamedTempFile, String> {
+    let mut file = tempfile::NamedTempFile::new()
+        .map_err(|error| format!("create temporary Ghostty theme: {error}"))?;
+    file.write_all(theme_config_contents(theme).as_bytes())
+        .map_err(|error| format!("write temporary Ghostty theme: {error}"))?;
+    Ok(file)
 }
 
 /// A GPUI entity backed by Ghostty's native Metal or Wayland/OpenGL surface.
@@ -47,15 +128,34 @@ impl Terminal {
         window: &mut Window,
         cx: &mut Context<T>,
     ) -> Result<Entity<Self>, String> {
-        let working_directory =
-            CString::new(options.working_directory.to_string_lossy().as_bytes()).map_err(|_| {
+        let TerminalOptions {
+            command,
+            working_directory,
+            focus_on_spawn,
+            configuration,
+        } = options;
+        let working_directory = CString::new(working_directory.to_string_lossy().as_bytes())
+            .map_err(|_| {
                 format!(
                     "terminal working directory contains a NUL byte: {}",
-                    options.working_directory.display()
+                    working_directory.display()
                 )
             })?;
-        let command = CString::new(options.command)
-            .map_err(|_| "terminal command contains a NUL byte".to_owned())?;
+        let command =
+            CString::new(command).map_err(|_| "terminal command contains a NUL byte".to_owned())?;
+        let (load_user_config, theme_config) = match configuration {
+            TerminalConfiguration::Default => (false, None),
+            TerminalConfiguration::UserDefault => (true, None),
+            TerminalConfiguration::Custom(theme) => (false, Some(write_theme_config(&theme)?)),
+            TerminalConfiguration::UserDefaultWithOverride(theme) => {
+                (true, Some(write_theme_config(&theme)?))
+            }
+        };
+        let theme_config_path = theme_config
+            .as_ref()
+            .map(|file| CString::new(file.path().to_string_lossy().as_bytes()))
+            .transpose()
+            .map_err(|_| "temporary Ghostty theme path contains a NUL byte".to_owned())?;
         let native_window = native_window(window)?;
         let surface = NativeSurface::new(
             native_window.display,
@@ -63,10 +163,12 @@ impl Terminal {
             f64::from(window.scale_factor()),
             working_directory,
             command,
+            load_user_config,
+            theme_config_path.as_deref(),
         )
         .map_err(|error| format!("initialize libghostty: {error}"))?;
         let focus = cx.focus_handle();
-        if options.focus_on_spawn {
+        if focus_on_spawn {
             focus.focus(window, cx);
         }
         Ok(cx.new(|_| Self {
@@ -717,5 +819,48 @@ mod tests {
         let (active, consumed) = key_modifiers(modifiers, false, false);
         assert_eq!(active, Modifiers::SHIFT);
         assert_eq!(consumed, Modifiers::empty());
+    }
+
+    #[test]
+    fn terminal_options_use_bare_defaults_by_default() {
+        let options = TerminalOptions::new("sh", ".");
+        assert_eq!(options.configuration, TerminalConfiguration::Default);
+    }
+
+    #[test]
+    fn terminal_theme_serializes_to_ghostty_config() {
+        let palette = std::array::from_fn(|index| {
+            TerminalColor::new(index as u8, index as u8 + 1, index as u8 + 2)
+        });
+        let theme = TerminalTheme::new(
+            TerminalColor::new(0x1d, 0x20, 0x21),
+            TerminalColor::new(0xd5, 0xc4, 0xa1),
+            palette,
+        );
+
+        let config = theme_config_contents(&theme);
+
+        assert!(
+            config.starts_with("background = #1d2021\nforeground = #d5c4a1\npalette = 0=#000102\n")
+        );
+        assert!(config.contains("palette = 15=#0f1011\n"));
+        assert_eq!(config.matches("palette = ").count(), 16);
+        assert!(config.ends_with("palette-generate = true\n"));
+    }
+
+    #[test]
+    fn temporary_theme_config_is_removed_when_released() {
+        let theme = TerminalTheme::new(
+            TerminalColor::new(0, 0, 0),
+            TerminalColor::new(255, 255, 255),
+            [TerminalColor::new(0, 0, 0); 16],
+        );
+        let file = write_theme_config(&theme).expect("theme config should be writable");
+        let path = file.path().to_owned();
+        assert!(path.exists());
+
+        drop(file);
+
+        assert!(!path.exists());
     }
 }

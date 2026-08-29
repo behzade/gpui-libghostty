@@ -1381,6 +1381,7 @@ dependencies = [
  "libloading",
  "raw-window-handle",
  "smallvec",
+ "tempfile",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",

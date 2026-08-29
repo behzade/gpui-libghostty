@@ -170,6 +170,8 @@ mod platform {
             parent_view: *mut c_void,
             working_directory: *const c_char,
             command: *const c_char,
+            load_user_config: bool,
+            theme_config_path: *const c_char,
             wakeup_userdata: *mut c_void,
             wakeup: unsafe extern "C" fn(*mut c_void),
         ) -> *mut RawSurface;
@@ -243,6 +245,8 @@ mod platform {
             _scale_factor: f64,
             working_directory: CString,
             command: CString,
+            load_user_config: bool,
+            theme_config_path: Option<&CStr>,
         ) -> Result<Self, &'static str> {
             let wakeup = NativeWakeup::new();
             // SAFETY: The C shim validates creation failures. The parent pointer and
@@ -252,6 +256,8 @@ mod platform {
                     parent_view.as_ptr(),
                     working_directory.as_ptr(),
                     command.as_ptr(),
+                    load_user_config,
+                    theme_config_path.map_or(std::ptr::null(), CStr::as_ptr),
                     wakeup.userdata(),
                     native_wakeup,
                 )
@@ -434,6 +440,8 @@ impl NativeSurface {
         _scale_factor: f64,
         _working_directory: CString,
         _command: CString,
+        _load_user_config: bool,
+        _theme_config_path: Option<&CStr>,
     ) -> Result<Self, &'static str> {
         Err("libghostty native surfaces require macOS or Wayland")
     }

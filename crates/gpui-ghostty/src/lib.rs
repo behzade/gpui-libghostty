@@ -6,4 +6,6 @@
 mod native;
 mod terminal;
 
-pub use terminal::{Terminal, TerminalOptions};
+pub use terminal::{
+    Terminal, TerminalColor, TerminalConfiguration, TerminalOptions, TerminalTheme,
+};

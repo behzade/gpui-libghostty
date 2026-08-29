@@ -22,6 +22,8 @@ unsafe extern "C" {
         swap_buffers: unsafe extern "C" fn(*mut c_void),
         working_directory: *const c_char,
         command: *const c_char,
+        load_user_config: bool,
+        theme_config_path: *const c_char,
         scale_factor: f64,
         wakeup_userdata: *mut c_void,
         wakeup: unsafe extern "C" fn(*mut c_void),
@@ -109,6 +111,8 @@ impl NativeSurface {
         scale_factor: f64,
         working_directory: CString,
         command: CString,
+        load_user_config: bool,
+        theme_config_path: Option<&CStr>,
     ) -> Result<Self, String> {
         let display = display.ok_or_else(|| "Wayland display handle is unavailable".to_owned())?;
         let wakeup = NativeWakeup::new();
@@ -125,6 +129,8 @@ impl NativeSurface {
                 swap_buffers,
                 working_directory.as_ptr(),
                 command.as_ptr(),
+                load_user_config,
+                theme_config_path.map_or(std::ptr::null(), CStr::as_ptr),
                 scale_factor,
                 wakeup.userdata(),
                 native_wakeup,

@@ -100,6 +100,8 @@ gpui_ghostty_surface *gpui_ghostty_surface_new(
     void *parent_view,
     const char *working_directory,
     const char *command,
+    bool load_user_config,
+    const char *theme_config_path,
     void *wakeup_userdata,
     gpui_ghostty_wakeup_cb wakeup
 ) {
@@ -124,6 +126,13 @@ gpui_ghostty_surface *gpui_ghostty_surface_new(
 
     state->config = ghostty_config_new();
     if (state->config == NULL) goto fail;
+    if (load_user_config) {
+        ghostty_config_load_default_files(state->config);
+        ghostty_config_load_recursive_files(state->config);
+    }
+    if (theme_config_path != NULL) {
+        ghostty_config_load_file(state->config, theme_config_path);
+    }
     ghostty_config_finalize(state->config);
 
     ghostty_runtime_config_s runtime = {

@@ -15,6 +15,7 @@ gpui.workspace = true
 image = { version = "0.25", default-features = false }
 raw-window-handle.workspace = true
 smallvec = "1.15"
+tempfile = "3.27"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 khronos-egl = { version = "6.0", features = ["dynamic"] }

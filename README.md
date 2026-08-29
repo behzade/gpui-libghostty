@@ -78,6 +78,34 @@ let terminal = Terminal::spawn(
 )?;
 ```
 
+`TerminalOptions::configuration` selects bare Ghostty defaults, the user's
+Ghostty configuration, or application-owned colors:
+
+```rust,ignore
+use gpui_ghostty::{
+    TerminalColor, TerminalConfiguration, TerminalOptions, TerminalTheme,
+};
+
+let mut options = TerminalOptions::new("bash", project_directory);
+options.configuration = TerminalConfiguration::UserDefault;
+
+let theme = TerminalTheme::new(
+    TerminalColor::new(0x1d, 0x20, 0x21),
+    TerminalColor::new(0xd5, 0xc4, 0xa1),
+    ansi_palette,
+);
+options.configuration = TerminalConfiguration::Custom(theme);
+// Or preserve user settings while replacing their colors:
+options.configuration = TerminalConfiguration::UserDefaultWithOverride(theme);
+```
+
+`Default` is selected by `TerminalOptions::new` and reads no user files.
+`UserDefault` loads Ghostty's default and recursively referenced configuration
+files. `Custom` starts from bare defaults and applies the supplied colors.
+`UserDefaultWithOverride` loads user configuration first, then applies the
+supplied colors so they win. Custom colors generate the remaining indexed
+colors from the supplied 16-color palette.
+
 `Terminal::spawn` returns `Entity<Terminal>`, which can be rendered directly as
 a GPUI child. `Terminal::snapshot` performs a one-shot GPU readback and returns
 a `gpui::RenderImage`; render it at the terminal's logical bounds when temporarily
