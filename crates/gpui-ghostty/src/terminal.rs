@@ -74,6 +74,7 @@ pub enum TerminalConfiguration {
 }
 
 /// Configuration for a terminal process rendered by libghostty.
+#[non_exhaustive]
 pub struct TerminalOptions {
     pub command: String,
     pub working_directory: PathBuf,

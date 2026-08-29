@@ -65,7 +65,7 @@ directory must contain every package required by the vendored Ghostty source.
 
 ```toml
 [dependencies]
-gpui-ghostty = { package = "gpui-libghostty", version = "0.1" }
+gpui-ghostty = { package = "gpui-libghostty", version = "0.2" }
 ```
 
 ```rust,ignore
