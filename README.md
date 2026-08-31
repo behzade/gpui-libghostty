@@ -124,8 +124,9 @@ let editor = NvimEditor::spawn(
 let editor = cx.new(|_| editor);
 ```
 
-Call `NvimEditor::open_file` through the entity to reuse the running Neovim
-instance.
+Call and await `NvimEditor::open_file` through the entity to reuse the running
+Neovim instance. Remote requests run off the UI thread and return the error
+reported by Neovim when they fail.
 
 ## Versioning
 

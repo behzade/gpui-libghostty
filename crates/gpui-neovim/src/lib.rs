@@ -1,22 +1,24 @@
 //! Embedded Neovim component for GPUI, rendered by [`gpui_ghostty`].
 
 use std::{
-    ffi::OsStr,
+    io::Read as _,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
+    thread,
+    time::{Duration, Instant},
 };
 
-use gpui::{App, Context, Entity, IntoElement, Render, RenderImage, Window};
+use gpui::{App, Context, Entity, IntoElement, Render, RenderImage, Task, Window};
 use gpui_ghostty::{Terminal, TerminalOptions};
 use wait_timeout::ChildExt as _;
 
 static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(1);
-const DEFAULT_REMOTE_TIMEOUT: Duration = Duration::from_secs(1);
+const DEFAULT_REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
+const REMOTE_RETRY_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Configuration for an embedded Neovim instance.
 pub struct NvimOptions {
@@ -106,75 +108,134 @@ impl NvimEditor {
         self.terminal.update(cx, |terminal, _| terminal.snapshot())
     }
 
-    /// Opens `path` in the existing Neovim server rather than spawning another editor.
-    pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Result<(), String> {
+    /// Opens `path` in the existing Neovim server without blocking the UI thread.
+    pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<Result<(), String>> {
         self.open_file_at_line(path, None, cx)
     }
 
-    /// Opens `path` and places the cursor at `line` when supplied.
+    /// Opens `path`, places the cursor at `line`, and completes when Neovim accepts the request.
     pub fn open_file_at_line(
         &mut self,
         path: PathBuf,
         line: Option<u64>,
         cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    ) -> Task<Result<(), String>> {
         if !self.terminal.read(cx).is_alive() {
-            return Err("the embedded Neovim process has exited".to_owned());
+            return Task::ready(Err("the embedded Neovim process has exited".to_owned()));
         }
-        self.run_remote("--remote", path.as_os_str())?;
-        if let Some(line) = line {
-            self.run_remote("--remote-expr", format!("cursor({line}, 1)"))?;
-        }
-        self.path = path;
-        Ok(())
-    }
 
-    fn run_remote(&self, operation: &str, argument: impl AsRef<OsStr>) -> Result<(), String> {
-        let mut remote = remote_command(
-            &self.executable,
-            &self.project,
-            &self.socket,
-            operation,
-            argument,
-        )
-        .spawn()
-        .map_err(|error| format!("contact embedded Neovim: {error}"))?;
-        let status = remote
-            .wait_timeout(self.remote_timeout)
-            .map_err(|error| format!("wait for embedded Neovim: {error}"))?;
-        let Some(status) = status else {
-            let _ = remote.kill();
-            let _ = remote.wait();
-            return Err(format!(
-                "Neovim did not respond within {:?}",
-                self.remote_timeout
-            ));
-        };
-        if !status.success() {
-            return Err(format!("Neovim remote command exited with {status}"));
-        }
-        Ok(())
+        let executable = self.executable.clone();
+        let project = self.project.clone();
+        let socket = self.socket.clone();
+        let timeout = self.remote_timeout;
+        let expression = open_file_expression(&path, line);
+        let request = cx
+            .background_executor()
+            .spawn(async move { run_remote(&executable, &project, &socket, &expression, timeout) });
+
+        cx.spawn(async move |editor, cx| {
+            request.await?;
+            editor
+                .update(cx, |editor, _| editor.path = path)
+                .map_err(|_| "the embedded Neovim editor was dropped".to_owned())?;
+            Ok(())
+        })
     }
 }
 
-fn remote_command(
+fn run_remote(
     executable: &Path,
     project: &Path,
     socket: &Path,
-    operation: &str,
-    argument: impl AsRef<OsStr>,
-) -> Command {
+    expression: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let mut last_connection_error = String::new();
+    loop {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(format!(
+                "connect to embedded Neovim at {} after {timeout:?}{}",
+                socket.display(),
+                error_detail(&last_connection_error)
+            ));
+        }
+
+        let remote = remote_command(executable, project, socket, expression)
+            .spawn()
+            .map_err(|error| format!("contact embedded Neovim: {error}"))?;
+        let (status, stderr) = wait_for_remote(remote, remaining)?;
+        if status.success() {
+            return Ok(());
+        }
+        if !server_unavailable(&stderr) {
+            return Err(format!(
+                "Neovim remote request exited with {status}{}",
+                error_detail(&stderr)
+            ));
+        }
+        last_connection_error = stderr;
+        thread::sleep(REMOTE_RETRY_INTERVAL.min(remaining));
+    }
+}
+
+fn wait_for_remote(mut remote: Child, timeout: Duration) -> Result<(ExitStatus, String), String> {
+    let status = remote
+        .wait_timeout(timeout)
+        .map_err(|error| format!("wait for embedded Neovim: {error}"))?;
+    if status.is_none() {
+        let _ = remote.kill();
+        let _ = remote.wait();
+    }
+
+    let mut stderr = String::new();
+    if let Some(mut pipe) = remote.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    match status {
+        Some(status) => Ok((status, stderr)),
+        None => Err(format!(
+            "embedded Neovim remote request timed out after {timeout:?}{}",
+            error_detail(&stderr)
+        )),
+    }
+}
+
+fn server_unavailable(stderr: &str) -> bool {
+    stderr.contains("E247:") || stderr.contains("Failed to connect")
+}
+
+fn error_detail(stderr: &str) -> String {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        String::new()
+    } else {
+        format!(": {stderr}")
+    }
+}
+
+fn remote_command(executable: &Path, project: &Path, socket: &Path, expression: &str) -> Command {
     let mut command = Command::new(executable);
     command
         .current_dir(project)
         .arg("--server")
         .arg(socket)
-        .arg(operation)
-        .arg(argument)
+        .arg("--remote-expr")
+        .arg(expression)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     command
+}
+
+fn open_file_expression(path: &Path, line: Option<u64>) -> String {
+    let path = path.to_string_lossy().replace('\'', "''");
+    let edit = format!("execute('edit ' . fnameescape('{path}'))");
+    match line {
+        Some(line) => format!("[{edit}, cursor({line}, 1)]"),
+        None => edit,
+    }
 }
 
 impl Render for NvimEditor {
@@ -221,12 +282,11 @@ mod tests {
     }
 
     #[test]
-    fn remote_commands_keep_the_operation_and_argument_separate() {
+    fn remote_commands_use_an_expression_instead_of_remote_fallback() {
         let command = remote_command(
             Path::new("/tmp/my nvim"),
             Path::new("/tmp/project"),
             Path::new("/tmp/editor.sock"),
-            "--remote-expr",
             "cursor(42, 1)",
         );
 
@@ -239,6 +299,18 @@ mod tests {
                 "--remote-expr",
                 "cursor(42, 1)"
             ]
+        );
+    }
+
+    #[test]
+    fn open_expression_escapes_paths_and_moves_the_cursor_atomically() {
+        assert_eq!(
+            open_file_expression(Path::new("/tmp/it's.rs"), Some(42)),
+            "[execute('edit ' . fnameescape('/tmp/it''s.rs')), cursor(42, 1)]"
+        );
+        assert_eq!(
+            open_file_expression(Path::new("/tmp/plain.rs"), None),
+            "execute('edit ' . fnameescape('/tmp/plain.rs'))"
         );
     }
 
