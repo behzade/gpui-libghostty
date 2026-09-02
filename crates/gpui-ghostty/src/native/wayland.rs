@@ -462,7 +462,10 @@ impl EglSurface {
             })
             .ok_or_else(|| "load glViewport".to_owned())?;
         unsafe { viewport(0, 0, 1, 1) };
-        let _ = api.swap_interval(display, 1);
+        // Ghostty renders this child surface from GPUI's event-loop thread. A
+        // blocking, vsynced swap here can stall Wayland key-repeat timers; the
+        // top-level GPUI window already provides frame pacing.
+        let _ = api.swap_interval(display, 0);
 
         Ok(Self {
             api,
