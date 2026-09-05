@@ -111,6 +111,34 @@ a GPUI child. `Terminal::snapshot` performs a one-shot GPU readback and returns
 a `gpui::RenderImage`; render it at the terminal's logical bounds when temporarily
 replacing the native surface beneath a normal GPUI overlay.
 
+### Clipboard approval and focus
+
+Protected clipboard operations are denied unless `TerminalOptions::clipboard_approval`
+accepts them. This includes OSC 52 reads with Ghostty's default `clipboard-read = ask`,
+unsafe pastes, and writes configured with `clipboard-write = ask`. Explicit Ghostty
+`allow`/`deny` settings still apply; ordinary safe pastes do not need approval.
+
+```rust,ignore
+use std::sync::Arc;
+use gpui_ghostty::ClipboardOperation;
+
+// Example application policy: permit writes that Ghostty asks to confirm,
+// but deny protected reads and unsafe pastes.
+options.clipboard_approval = Some(Arc::new(|request| {
+    request.operation == ClipboardOperation::Write
+}));
+```
+
+The callback receives the operation and text. It is synchronous and must not
+block, re-enter the terminal, or open a modal event loop. Missing or panicking
+callbacks deny access. Denied reads return an empty response; denied unsafe
+pastes insert nothing. Treat callback text as sensitive and avoid logging it.
+`NvimOptions::clipboard_approval` exposes the same policy for embedded Neovim.
+
+`Terminal::set_visible` does not steal keyboard focus, and hidden native surfaces
+stay hidden across layout and resize. Native focus follows GPUI entity focus and
+window activation. Use `Terminal::focus` to explicitly show and focus a terminal.
+
 ## Neovim
 
 ```rust,ignore
@@ -127,6 +155,19 @@ let editor = cx.new(|_| editor);
 Call and await `NvimEditor::open_file` through the entity to reuse the running
 Neovim instance. Remote requests run off the UI thread and return the error
 reported by Neovim when they fail.
+
+## Checks
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+```
+
+`.github/workflows/ci.yml` runs these checks, including the native build, on
+macOS and Linux for pull requests and main-branch pushes. Tagged releases must
+pass the same matrix before publishing. These are build and unit-test checks,
+not interactive AppKit/Wayland rendering tests.
 
 ## Versioning
 

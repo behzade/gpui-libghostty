@@ -11,10 +11,11 @@ use gpui::{
     AppContext as _, Bounds, ClipboardItem, Context, Entity, FocusHandle, InteractiveElement as _,
     IntoElement, KeyDownEvent, KeyUpEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ParentElement as _, Pixels, Render, RenderImage, ScrollDelta, ScrollWheelEvent, Styled as _,
-    Task, Window, canvas, div,
+    Subscription, Task, Window, canvas, div,
 };
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
+use crate::clipboard::ClipboardApprovalCallback;
 use crate::native::{KeyAction, Modifiers, MouseButton, MouseState, NativeSurface};
 
 /// An opaque terminal color without an alpha channel.
@@ -80,6 +81,8 @@ pub struct TerminalOptions {
     pub working_directory: PathBuf,
     pub focus_on_spawn: bool,
     pub configuration: TerminalConfiguration,
+    /// Approval policy for protected clipboard operations; absent means deny.
+    pub clipboard_approval: Option<ClipboardApprovalCallback>,
 }
 
 impl TerminalOptions {
@@ -89,6 +92,7 @@ impl TerminalOptions {
             working_directory: working_directory.into(),
             focus_on_spawn: true,
             configuration: TerminalConfiguration::Default,
+            clipboard_approval: None,
         }
     }
 }
@@ -120,6 +124,9 @@ pub struct Terminal {
     focus: FocusHandle,
     bounds: Bounds<Pixels>,
     tick_task: Option<Task<()>>,
+    visible: bool,
+    window_focused: bool,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Terminal {
@@ -134,6 +141,7 @@ impl Terminal {
             working_directory,
             focus_on_spawn,
             configuration,
+            clipboard_approval,
         } = options;
         let working_directory = CString::new(working_directory.to_string_lossy().as_bytes())
             .map_err(|_| {
@@ -168,15 +176,34 @@ impl Terminal {
             theme_config_path.as_deref(),
         )
         .map_err(|error| format!("initialize libghostty: {error}"))?;
+        surface.wakeup().init_clipboard_approval(clipboard_approval);
         let focus = cx.focus_handle();
         if focus_on_spawn {
             focus.focus(window, cx);
         }
-        Ok(cx.new(|_| Self {
-            surface,
-            focus,
-            bounds: Bounds::default(),
-            tick_task: None,
+        Ok(cx.new(|cx| {
+            let subscriptions = vec![
+                cx.on_focus(&focus, window, |terminal: &mut Self, window, _| {
+                    terminal.sync_focus(window)
+                }),
+                cx.on_blur(&focus, window, |terminal: &mut Self, window, _| {
+                    terminal.sync_focus(window)
+                }),
+                cx.observe_window_activation(window, |terminal: &mut Self, window, _| {
+                    terminal.sync_focus(window)
+                }),
+            ];
+            let mut terminal = Self {
+                surface,
+                focus,
+                bounds: Bounds::default(),
+                tick_task: None,
+                visible: true,
+                window_focused: false,
+                _subscriptions: subscriptions,
+            };
+            terminal.sync_focus(window);
+            terminal
         }))
     }
 
@@ -185,14 +212,22 @@ impl Terminal {
     }
 
     pub fn focus<T>(&mut self, window: &mut Window, cx: &mut Context<T>) {
-        self.surface.set_visible(true);
-        self.surface.set_focus(true);
+        self.set_visible(true);
         self.focus.focus(window, cx);
+        self.sync_focus(window);
     }
 
+    /// Shows or hides the native child without changing GPUI keyboard focus.
+    /// Hidden surfaces remain hidden across layout, resize, and scale changes.
     pub fn set_visible(&mut self, visible: bool) {
+        self.visible = visible;
         self.surface.set_visible(visible);
-        self.surface.set_focus(visible);
+        self.surface.set_focus(self.visible && self.window_focused);
+    }
+
+    fn sync_focus(&mut self, window: &Window) {
+        self.window_focused = self.focus.is_focused(window) && window.is_window_active();
+        self.surface.set_focus(self.visible && self.window_focused);
     }
 
     /// Captures the last completed native frame for temporary GPUI compositing.
@@ -333,7 +368,7 @@ impl Terminal {
 
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.focus.focus(window, cx);
-        self.surface.set_focus(true);
+        self.sync_focus(window);
         self.mouse_position(event.position, event.modifiers);
         self.surface.mouse_button(
             MouseState::Press,
@@ -366,7 +401,8 @@ impl Terminal {
 }
 
 impl Render for Terminal {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_focus(window);
         self.start_ticking(cx);
         let terminal = cx.entity().downgrade();
         div()

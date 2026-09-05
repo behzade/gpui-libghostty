@@ -17,6 +17,8 @@
 @end
 
 typedef void (*gpui_ghostty_wakeup_cb)(void *userdata);
+// Adapter operation values: paste=0, read=1, write=2.
+typedef bool (*gpui_ghostty_approve_clipboard_cb)(void *userdata, int operation, const char *text);
 
 typedef struct gpui_ghostty_surface {
     ghostty_config_t config;
@@ -26,6 +28,7 @@ typedef struct gpui_ghostty_surface {
     GpuiGhosttyView *view;
     void *wakeup_userdata;
     gpui_ghostty_wakeup_cb wakeup;
+    gpui_ghostty_approve_clipboard_cb approve_clipboard;
     _Atomic bool alive;
 } gpui_ghostty_surface;
 
@@ -61,10 +64,14 @@ static void runtime_confirm_read_clipboard(
     void *request,
     ghostty_clipboard_request_e kind
 ) {
-    (void)kind;
     gpui_ghostty_surface *state = userdata;
     if (state->surface != NULL) {
-        ghostty_surface_complete_clipboard_request(state->surface, text, request, true);
+        int operation = kind == GHOSTTY_CLIPBOARD_REQUEST_PASTE ? 0 : 1;
+        bool approved = state->approve_clipboard != NULL &&
+            state->approve_clipboard(state->wakeup_userdata, operation, text);
+        // Completing with empty text releases Ghostty's request without exposing
+        // clipboard contents or inserting an unsafe paste.
+        ghostty_surface_complete_clipboard_request(state->surface, approved ? text : "", request, true);
     }
 }
 
@@ -75,11 +82,12 @@ static void runtime_write_clipboard(
     size_t count,
     bool confirm
 ) {
-    (void)userdata;
+    gpui_ghostty_surface *state = userdata;
     (void)location;
-    (void)confirm;
     for (size_t index = 0; index < count; index++) {
         if (strcmp(content[index].mime, "text/plain") != 0) continue;
+        if (confirm && (state->approve_clipboard == NULL ||
+            !state->approve_clipboard(state->wakeup_userdata, 2, content[index].data))) return;
         NSString *text = [NSString stringWithUTF8String:content[index].data];
         if (text == nil) return;
         NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
@@ -103,7 +111,8 @@ gpui_ghostty_surface *gpui_ghostty_surface_new(
     bool load_user_config,
     const char *theme_config_path,
     void *wakeup_userdata,
-    gpui_ghostty_wakeup_cb wakeup
+    gpui_ghostty_wakeup_cb wakeup,
+    gpui_ghostty_approve_clipboard_cb approve_clipboard
 ) {
     static dispatch_once_t once;
     static int init_result = -1;
@@ -119,6 +128,7 @@ gpui_ghostty_surface *gpui_ghostty_surface_new(
     atomic_init(&state->alive, true);
     state->wakeup_userdata = wakeup_userdata;
     state->wakeup = wakeup;
+    state->approve_clipboard = approve_clipboard;
     state->parent = (NSView *)parent_view;
     state->view = [[GpuiGhosttyView alloc] initWithFrame:NSMakeRect(0, 0, 800, 600)];
     [state->view setHidden:YES];
@@ -167,8 +177,8 @@ gpui_ghostty_surface *gpui_ghostty_surface_new(
     state->surface = ghostty_surface_new(state->app, &surface_config);
     if (state->surface == NULL) goto fail;
 
-    ghostty_app_set_focus(state->app, true);
-    ghostty_surface_set_focus(state->surface, true);
+    ghostty_app_set_focus(state->app, false);
+    ghostty_surface_set_focus(state->surface, false);
     return state;
 
 fail:
@@ -266,11 +276,9 @@ void gpui_ghostty_surface_set_frame(
     if (state == NULL || state->surface == NULL) return;
     double parent_height = NSHeight(state->parent.bounds);
     [state->view setFrame:NSMakeRect(x, parent_height - y - height, width, height)];
-    [state->view setHidden:NO];
     double scale = state->parent.window.backingScaleFactor ?: NSScreen.mainScreen.backingScaleFactor;
     ghostty_surface_set_content_scale(state->surface, scale, scale);
     ghostty_surface_set_size(state->surface, (uint32_t)(width * scale), (uint32_t)(height * scale));
-    ghostty_surface_set_occlusion(state->surface, true);
     ghostty_surface_refresh(state->surface);
 }
 

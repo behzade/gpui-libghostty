@@ -12,6 +12,8 @@
 typedef bool (*gpui_ghostty_make_current_cb)(void *userdata);
 typedef void (*gpui_ghostty_context_cb)(void *userdata);
 typedef void (*gpui_ghostty_wakeup_cb)(void *userdata);
+// Adapter operation values: paste=0, read=1, write=2.
+typedef bool (*gpui_ghostty_approve_clipboard_cb)(void *userdata, int operation, const char *text);
 
 typedef struct gpui_ghostty_surface {
     ghostty_config_t config;
@@ -23,6 +25,7 @@ typedef struct gpui_ghostty_surface {
     gpui_ghostty_context_cb swap_buffers;
     void *wakeup_userdata;
     gpui_ghostty_wakeup_cb wakeup;
+    gpui_ghostty_approve_clipboard_cb approve_clipboard;
     void *clipboard_request;
     ghostty_clipboard_e clipboard_location;
     char *clipboard_write;
@@ -118,10 +121,14 @@ static void runtime_confirm_read_clipboard(
     void *request,
     ghostty_clipboard_request_e kind
 ) {
-    (void)kind;
     gpui_ghostty_surface *state = userdata;
     if (state->surface != NULL) {
-        ghostty_surface_complete_clipboard_request(state->surface, text, request, true);
+        int operation = kind == GHOSTTY_CLIPBOARD_REQUEST_PASTE ? 0 : 1;
+        bool approved = state->approve_clipboard != NULL &&
+            state->approve_clipboard(state->wakeup_userdata, operation, text);
+        // Completing with empty text releases Ghostty's request without exposing
+        // clipboard contents or inserting an unsafe paste.
+        ghostty_surface_complete_clipboard_request(state->surface, approved ? text : "", request, true);
     }
 }
 
@@ -132,10 +139,11 @@ static void runtime_write_clipboard(
     size_t count,
     bool confirm
 ) {
-    (void)confirm;
     gpui_ghostty_surface *state = userdata;
     for (size_t index = 0; index < count; index++) {
         if (strcmp(content[index].mime, "text/plain") != 0) continue;
+        if (confirm && (state->approve_clipboard == NULL ||
+            !state->approve_clipboard(state->wakeup_userdata, 2, content[index].data))) return;
         char *copy = strdup(content[index].data);
         if (copy == NULL) return;
         free(state->clipboard_write);
@@ -164,7 +172,8 @@ gpui_ghostty_surface *gpui_ghostty_surface_linux_new(
     const char *theme_config_path,
     double scale_factor,
     void *wakeup_userdata,
-    gpui_ghostty_wakeup_cb wakeup
+    gpui_ghostty_wakeup_cb wakeup,
+    gpui_ghostty_approve_clipboard_cb approve_clipboard
 ) {
     pthread_once(&ghostty_once, initialize_ghostty);
     if (ghostty_init_result != GHOSTTY_SUCCESS || platform_userdata == NULL ||
@@ -185,6 +194,7 @@ gpui_ghostty_surface *gpui_ghostty_surface_linux_new(
     state->swap_buffers = swap_buffers;
     state->wakeup_userdata = wakeup_userdata;
     state->wakeup = wakeup;
+    state->approve_clipboard = approve_clipboard;
 
     state->config = ghostty_config_new();
     if (state->config == NULL) goto fail;
@@ -229,8 +239,8 @@ gpui_ghostty_surface *gpui_ghostty_surface_linux_new(
     state->surface = ghostty_surface_new(state->app, &surface_config);
     if (state->surface == NULL) goto fail;
 
-    ghostty_app_set_focus(state->app, true);
-    ghostty_surface_set_focus(state->surface, true);
+    ghostty_app_set_focus(state->app, false);
+    ghostty_surface_set_focus(state->surface, false);
     clear_current(platform_userdata);
     return state;
 
@@ -381,7 +391,6 @@ void gpui_ghostty_surface_linux_set_size(
     state->height = height;
     ghostty_surface_set_content_scale(state->surface, scale_factor, scale_factor);
     ghostty_surface_set_size(state->surface, width, height);
-    ghostty_surface_set_occlusion(state->surface, true);
     ghostty_surface_refresh(state->surface);
 }
 

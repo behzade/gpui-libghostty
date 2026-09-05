@@ -13,12 +13,14 @@ use std::{
 };
 
 use gpui::{App, Context, Entity, IntoElement, Render, RenderImage, Task, Window};
-use gpui_ghostty::{Terminal, TerminalOptions};
+use gpui_ghostty::{ClipboardApprovalCallback, Terminal, TerminalOptions};
 use wait_timeout::ChildExt as _;
 
 static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(1);
 const DEFAULT_REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
 const REMOTE_RETRY_INTERVAL: Duration = Duration::from_millis(25);
+const REMOTE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const MAX_REMOTE_STDERR: usize = 64 * 1024;
 
 /// Configuration for an embedded Neovim instance.
 pub struct NvimOptions {
@@ -27,6 +29,8 @@ pub struct NvimOptions {
     pub initial_line: Option<u64>,
     pub executable: PathBuf,
     pub remote_timeout: Duration,
+    /// Approval policy for protected terminal clipboard operations.
+    pub clipboard_approval: Option<ClipboardApprovalCallback>,
 }
 
 impl NvimOptions {
@@ -39,6 +43,7 @@ impl NvimOptions {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("nvim")),
             remote_timeout: DEFAULT_REMOTE_TIMEOUT,
+            clipboard_approval: None,
         }
     }
 }
@@ -66,11 +71,9 @@ impl NvimEditor {
             &options.initial_file,
             options.initial_line,
         );
-        let terminal = Terminal::spawn(
-            TerminalOptions::new(command, options.project.clone()),
-            window,
-            cx,
-        )?;
+        let mut terminal_options = TerminalOptions::new(command, options.project.clone());
+        terminal_options.clipboard_approval = options.clipboard_approval;
+        let terminal = Terminal::spawn(terminal_options, window, cx)?;
         Ok(Self {
             project: options.project,
             path: options.initial_file,
@@ -181,25 +184,65 @@ fn run_remote(
 }
 
 fn wait_for_remote(mut remote: Child, timeout: Duration) -> Result<(ExitStatus, String), String> {
-    let status = remote
-        .wait_timeout(timeout)
-        .map_err(|error| format!("wait for embedded Neovim: {error}"))?;
-    if status.is_none() {
+    let started = Instant::now();
+    let mut stderr = Vec::new();
+    let result = (|| {
+        // Nonblocking reads avoid both a full-pipe deadlock and waiting forever
+        // for EOF when a descendant inherits stderr from the remote process.
+        if let Some(pipe) = remote.stderr.as_ref() {
+            let flags = rustix::fs::fcntl_getfl(pipe)
+                .map_err(|error| format!("read Neovim stderr flags: {error}"))?;
+            rustix::fs::fcntl_setfl(pipe, flags | rustix::fs::OFlags::NONBLOCK)
+                .map_err(|error| format!("set Neovim stderr nonblocking: {error}"))?;
+        }
+        loop {
+            drain_remote_stderr(&mut remote, &mut stderr)?;
+            if let Some(status) = remote
+                .try_wait()
+                .map_err(|error| format!("wait for embedded Neovim: {error}"))?
+            {
+                drain_remote_stderr(&mut remote, &mut stderr)?;
+                return Ok((status, String::from_utf8_lossy(&stderr).into_owned()));
+            }
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(format!(
+                    "embedded Neovim remote request timed out after {timeout:?}{}",
+                    error_detail(&String::from_utf8_lossy(&stderr))
+                ));
+            }
+            remote
+                .wait_timeout(REMOTE_POLL_INTERVAL.min(remaining))
+                .map_err(|error| format!("wait for embedded Neovim: {error}"))?;
+        }
+    })();
+    if result.is_err() {
+        // Also reap the child on setup/read/wait errors, not just timeout.
         let _ = remote.kill();
         let _ = remote.wait();
     }
+    result
+}
 
-    let mut stderr = String::new();
-    if let Some(mut pipe) = remote.stderr.take() {
-        let _ = pipe.read_to_string(&mut stderr);
+fn drain_remote_stderr(remote: &mut Child, captured: &mut Vec<u8>) -> Result<(), String> {
+    let Some(pipe) = remote.stderr.as_mut() else {
+        return Ok(());
+    };
+    let mut buffer = [0; 8192];
+    // Bound work per poll even when the child continuously writes diagnostics.
+    for _ in 0..MAX_REMOTE_STDERR / buffer.len() {
+        match pipe.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => {
+                let keep = count.min(MAX_REMOTE_STDERR.saturating_sub(captured.len()));
+                captured.extend_from_slice(&buffer[..keep]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(format!("read embedded Neovim stderr: {error}")),
+        }
     }
-    match status {
-        Some(status) => Ok((status, stderr)),
-        None => Err(format!(
-            "embedded Neovim remote request timed out after {timeout:?}{}",
-            error_detail(&stderr)
-        )),
-    }
+    Ok(())
 }
 
 fn server_unavailable(stderr: &str) -> bool {
@@ -267,6 +310,54 @@ fn socket_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shell_child(script: &str) -> Child {
+        Command::new("sh")
+            .args(["-c", script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn test child")
+    }
+
+    #[test]
+    fn remote_stderr_larger_than_a_pipe_is_drained_and_bounded() {
+        let child = shell_child("head -c 1048576 /dev/zero >&2");
+        let (status, stderr) =
+            wait_for_remote(child, Duration::from_secs(5)).expect("large stderr must not deadlock");
+        assert!(status.success());
+        assert_eq!(stderr.len(), MAX_REMOTE_STDERR);
+    }
+
+    #[test]
+    fn remote_timeout_kills_and_reaps_the_child() {
+        let child = shell_child("while :; do :; done");
+        let pid = child.id();
+        let started = Instant::now();
+        let error =
+            wait_for_remote(child, Duration::from_millis(50)).expect_err("child should time out");
+        assert!(error.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            !Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stderr(Stdio::null())
+                .status()
+                .expect("probe child")
+                .success()
+        );
+    }
+
+    #[test]
+    fn inherited_stderr_does_not_extend_the_deadline() {
+        let started = Instant::now();
+        let child = shell_child("sleep 1 & exit 0");
+        let (status, _) = wait_for_remote(child, Duration::from_millis(100))
+            .expect("must not wait for descendant EOF");
+        assert!(status.success());
+        assert!(started.elapsed() < Duration::from_millis(800));
+    }
 
     #[test]
     fn command_quotes_paths_at_the_ghostty_boundary() {

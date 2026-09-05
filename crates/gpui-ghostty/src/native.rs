@@ -3,17 +3,23 @@
 use std::{
     ffi::{CString, c_void},
     ptr::NonNull,
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 #[cfg(not(target_os = "linux"))]
 use std::ffi::CStr;
 
+use crate::clipboard::{ClipboardApproval, ClipboardApprovalCallback, ClipboardOperation};
 use async_channel::{Receiver, Sender};
+
+struct NativeCallbacks {
+    sender: Sender<()>,
+    approval: OnceLock<ClipboardApprovalCallback>,
+}
 
 #[derive(Clone)]
 pub struct NativeWakeup {
-    sender: Arc<Sender<()>>,
+    callbacks: Arc<NativeCallbacks>,
     receiver: Receiver<()>,
 }
 
@@ -21,7 +27,10 @@ impl NativeWakeup {
     fn new() -> Self {
         let (sender, receiver) = async_channel::bounded(1);
         Self {
-            sender: Arc::new(sender),
+            callbacks: Arc::new(NativeCallbacks {
+                sender,
+                approval: OnceLock::new(),
+            }),
             receiver,
         }
     }
@@ -32,20 +41,61 @@ impl NativeWakeup {
 
     #[cfg(any(target_os = "linux", test))]
     pub(crate) fn signal(&self) {
-        let _ = self.sender.try_send(());
+        let _ = self.callbacks.sender.try_send(());
+    }
+
+    // Installed once during Terminal::spawn, before servicing native events.
+    pub fn init_clipboard_approval(&self, callback: Option<ClipboardApprovalCallback>) {
+        if let Some(callback) = callback {
+            let _ = self.callbacks.approval.set(callback);
+        }
     }
 
     fn userdata(&self) -> *mut c_void {
-        Arc::as_ptr(&self.sender).cast_mut().cast()
+        Arc::as_ptr(&self.callbacks).cast_mut().cast()
     }
 }
 
 unsafe extern "C" fn native_wakeup(userdata: *mut c_void) {
-    let Some(sender) = NonNull::new(userdata.cast::<Sender<()>>()) else {
+    let Some(sender) = NonNull::new(userdata.cast::<NativeCallbacks>()) else {
         return;
     };
     // SAFETY: NativeSurface keeps the Arc allocation alive until native teardown completes.
-    let _ = unsafe { sender.as_ref() }.try_send(());
+    let _ = unsafe { sender.as_ref() }.sender.try_send(());
+}
+
+// The shim uses the same lifetime-stable userdata as the wakeup callback.
+unsafe extern "C" fn native_clipboard_approval(
+    userdata: *mut c_void,
+    operation: i32,
+    text: *const std::ffi::c_char,
+) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(callbacks) = NonNull::new(userdata.cast::<NativeCallbacks>()) else {
+            return false;
+        };
+        if text.is_null() {
+            return false;
+        }
+        let operation = match operation {
+            0 => ClipboardOperation::Paste,
+            1 => ClipboardOperation::Read,
+            2 => ClipboardOperation::Write,
+            _ => return false,
+        };
+        // SAFETY: NativeSurface owns userdata through teardown; the shim provides
+        // a NUL-terminated string valid for this callback only.
+        let callbacks = unsafe { callbacks.as_ref() };
+        let callback = callbacks.approval.get();
+        let text = unsafe { std::ffi::CStr::from_ptr(text) }.to_string_lossy();
+        callback.is_some_and(|callback| {
+            callback(ClipboardApproval {
+                operation,
+                text: &text,
+            })
+        })
+    }))
+    .unwrap_or(false)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -69,10 +119,20 @@ impl NativeFrame {
     }
 }
 
-#[derive(Default)]
 struct NativeSurfaceState {
     frame: Option<NativeFrame>,
     visible: bool,
+    requested_visible: bool,
+}
+
+impl Default for NativeSurfaceState {
+    fn default() -> Self {
+        Self {
+            frame: None,
+            visible: false,
+            requested_visible: true,
+        }
+    }
 }
 
 pub(crate) struct NativeSnapshot {
@@ -135,12 +195,13 @@ impl NativeSurfaceState {
         self.frame != Some(frame)
     }
 
-    fn commit_visible_frame(&mut self, frame: NativeFrame) {
+    fn commit_frame(&mut self, frame: NativeFrame) {
         self.frame = Some(frame);
-        self.visible = true;
     }
 
     fn update_visibility(&mut self, visible: bool) -> bool {
+        self.requested_visible = visible;
+        let visible = visible && self.frame.is_some();
         if self.visible == visible {
             return false;
         }
@@ -174,6 +235,7 @@ mod platform {
             theme_config_path: *const c_char,
             wakeup_userdata: *mut c_void,
             wakeup: unsafe extern "C" fn(*mut c_void),
+            approve_clipboard: unsafe extern "C" fn(*mut c_void, i32, *const c_char) -> bool,
         ) -> *mut RawSurface;
         fn gpui_ghostty_surface_free(surface: *mut RawSurface);
         fn gpui_ghostty_surface_tick(surface: *mut RawSurface);
@@ -260,6 +322,7 @@ mod platform {
                     theme_config_path.map_or(std::ptr::null(), CStr::as_ptr),
                     wakeup.userdata(),
                     native_wakeup,
+                    native_clipboard_approval,
                 )
             };
             let raw = NonNull::new(raw).ok_or("libghostty could not create a terminal surface")?;
@@ -317,18 +380,18 @@ mod platform {
         pub fn set_frame(&mut self, x: f64, y: f64, width: f64, height: f64, scale_factor: f64) {
             let frame = NativeFrame::new(x, y, width, height, scale_factor);
             if !self.state.frame_changed(frame) {
-                self.set_visible(true);
                 return;
             }
             // SAFETY: `raw` is valid and geometry values cross the C boundary by value.
             unsafe { gpui_ghostty_surface_set_frame(self.raw.as_ptr(), x, y, width, height) }
-            self.state.commit_visible_frame(frame);
+            self.state.commit_frame(frame);
+            self.set_visible(self.state.requested_visible);
         }
 
         pub fn set_visible(&mut self, visible: bool) {
             if self.state.update_visibility(visible) {
                 // SAFETY: `raw` is valid and this is called from the AppKit main thread.
-                unsafe { gpui_ghostty_surface_set_visible(self.raw.as_ptr(), visible) }
+                unsafe { gpui_ghostty_surface_set_visible(self.raw.as_ptr(), self.state.visible) }
             }
         }
 
@@ -549,6 +612,64 @@ pub enum MouseButton {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_visibility_survives_layout_and_resize() {
+        let mut state = NativeSurfaceState::default();
+        assert!(!state.update_visibility(false));
+        let first = NativeFrame::new(0.0, 0.0, 100.0, 100.0, 1.0);
+        state.commit_frame(first);
+        assert!(!state.update_visibility(state.requested_visible));
+        assert!(!state.visible);
+        assert!(!state.frame_changed(first));
+        state.commit_frame(NativeFrame::new(10.0, 10.0, 200.0, 200.0, 2.0));
+        assert!(!state.update_visibility(state.requested_visible));
+        assert!(!state.visible);
+        assert!(state.update_visibility(true));
+        assert!(state.visible);
+        assert!(state.update_visibility(false));
+        assert!(!state.visible);
+    }
+
+    #[test]
+    fn native_surface_is_only_revealed_after_its_first_frame() {
+        let mut state = NativeSurfaceState::default();
+        assert!(!state.update_visibility(true));
+        assert!(!state.visible);
+        state.commit_frame(NativeFrame::new(0.0, 0.0, 100.0, 100.0, 1.0));
+        assert!(state.update_visibility(state.requested_visible));
+        assert!(state.visible);
+    }
+
+    fn approve(wakeup: &NativeWakeup, operation: i32, text: &std::ffi::CStr) -> bool {
+        // SAFETY: Both userdata and text remain live for this synchronous call.
+        unsafe { native_clipboard_approval(wakeup.userdata(), operation, text.as_ptr()) }
+    }
+
+    #[test]
+    fn clipboard_policy_receives_operation_and_text() {
+        for (code, operation) in [
+            (0, ClipboardOperation::Paste),
+            (1, ClipboardOperation::Read),
+            (2, ClipboardOperation::Write),
+        ] {
+            let wakeup = NativeWakeup::new();
+            wakeup.init_clipboard_approval(Some(Arc::new(move |request| {
+                request.operation == operation && request.text == "approved"
+            })));
+            assert!(approve(&wakeup, code, c"approved"));
+            assert!(!approve(&wakeup, code, c"secret"));
+            assert!(!approve(&wakeup, 99, c"approved"));
+        }
+    }
+
+    #[test]
+    fn missing_or_panicking_clipboard_policy_denies_access() {
+        let wakeup = NativeWakeup::new();
+        assert!(!approve(&wakeup, 1, c"secret"));
+        wakeup.init_clipboard_approval(Some(Arc::new(|_| panic!("policy failure"))));
+        assert!(!approve(&wakeup, 1, c"secret"));
+    }
 
     #[test]
     fn native_wakeup_coalesces_duplicate_signals() {
