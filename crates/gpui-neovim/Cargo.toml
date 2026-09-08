@@ -9,7 +9,7 @@ repository.workspace = true
 
 [dependencies]
 gpui.workspace = true
-gpui-ghostty = { package = "gpui-libghostty", version = "0.2.2", path = "../gpui-ghostty" }
+gpui-ghostty = { package = "gpui-libghostty", version = "0.2.3", path = "../gpui-ghostty" }
 wait-timeout.workspace = true
 rustix = { version = "1.1", features = ["fs"] }
 
