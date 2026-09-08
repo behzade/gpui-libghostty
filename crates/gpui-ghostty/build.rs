@@ -10,6 +10,9 @@ const NATIVE_CACHE_VERSION: &str = "2";
 const SHARED_CACHE_NAME: &str = "gpui-libghostty";
 const ZIG_SYSTEM_PACKAGE_DIR_ENV: &str = "GHOSTTY_ZIG_SYSTEM_PACKAGE_DIR";
 const GHOSTTY_BUILD_OPTIONS: &[&str] = &[
+    // Keep in sync with vendor/ghostty/build.zig.zon. The copied source builds
+    // inside the consumer's target directory, so Git would detect its tags.
+    "-Dversion-string=1.3.2-dev",
     "-Dapp-runtime=none",
     "-Demit-xcframework=false",
     "-Demit-macos-app=false",
