@@ -148,6 +148,23 @@ window activation. Use `Terminal::focus` to explicitly show and focus a terminal
 
 ## Neovim
 
+Run a standalone window containing only the `gpui-neovim` editor:
+
+```sh
+cargo run -p gpui-neovim --example neovim -- README.md
+```
+
+The optional argument is a file or directory; without it, Neovim opens the current
+directory. The example uses your Neovim configuration. Install `nvim` on `PATH` or
+set `GPUI_NVIM` to its executable. On Linux, run it from a Wayland desktop session.
+Close the window to quit the example.
+
+To compile without opening a window:
+
+```sh
+cargo build -p gpui-neovim --example neovim --locked
+```
+
 ```rust,ignore
 use gpui_neovim::{NvimEditor, NvimOptions};
 

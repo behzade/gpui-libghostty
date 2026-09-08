@@ -13,5 +13,8 @@ gpui-ghostty = { package = "gpui-libghostty", version = "0.2.4", path = "../gpui
 wait-timeout.workspace = true
 rustix = { version = "1.1", features = ["fs"] }
 
+[dev-dependencies]
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "cc053a4a6fa2fd0e8793201ed9099466af1be0b1", features = ["font-kit", "runtime_shaders", "wayland"] }
+
 [lints]
 workspace = true
