@@ -1,13 +1,13 @@
 //! Safe, narrow Rust ownership wrappers for Ghostty's native render surfaces.
 
 use std::{
-    ffi::{CString, c_void},
+    ffi::c_void,
     ptr::NonNull,
     sync::{Arc, OnceLock},
 };
 
 #[cfg(not(target_os = "linux"))]
-use std::ffi::CStr;
+use std::ffi::{CStr, CString};
 
 use crate::clipboard::{ClipboardApproval, ClipboardApprovalCallback, ClipboardOperation};
 use async_channel::{Receiver, Sender};
