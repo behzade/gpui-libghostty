@@ -33,13 +33,20 @@ with the package.
 ## Requirements
 
 - Rust 1.95
-- macOS and Xcode command-line tools, or Wayland with EGL, libc++, and desktop OpenGL 4.3
+- macOS and Xcode command-line tools, or Wayland with EGL, libc++ 21 or newer,
+  libxml2, and desktop OpenGL 4.3
 - Zig 0.16
 - Neovim for `gpui-neovim`
 
 The default Nix development shell provides the Rust tools, Zig, Neovim, and
 the required Linux build and runtime libraries. macOS still requires Xcode
 command-line tools because the native build uses `xcrun`.
+
+Linux builds need the libc++ and libxml2 development packages as well as their
+runtime libraries. Zig 0.16's C++ headers require libc++ 21 or newer; an older
+runtime can fail to link with an undefined `std::__1::__hash_memory` symbol.
+On Ubuntu 24.04, install `libc++-21-dev` and `libc++abi-21-dev` from
+[LLVM's APT repository](https://apt.llvm.org/), plus `libxml2-dev` from Ubuntu.
 
 Set `ZIG` to select a non-default Zig executable. Set `GPUI_NVIM` or assign
 `NvimOptions::executable` to select Neovim.

@@ -35,6 +35,7 @@
             freetype
             libGL
             libxkbcommon
+            libxml2
             llvmPackages.libcxx
             wayland
           ];

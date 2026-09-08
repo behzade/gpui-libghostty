@@ -128,7 +128,9 @@ fn build_linux() {
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=ghostty-internal");
     println!("cargo:rustc-link-lib=static=gpui_ghostty_surface_linux");
-    for library in ["c++", "dl", "pthread", "m"] {
+    // The bundled fontconfig archive calls libxml2. Zig's libc++ headers also
+    // require a system libc++ runtime from LLVM 21 or newer.
+    for library in ["c++", "xml2", "dl", "pthread", "m"] {
         println!("cargo:rustc-link-lib={library}");
     }
 }
