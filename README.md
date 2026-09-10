@@ -13,6 +13,14 @@ Project status is alpha, expect bugs and instability.
 
 ## Crates
 
+Published on crates.io: [gpui-libghostty](https://crates.io/crates/gpui-libghostty)
+and [gpui-neovim](https://crates.io/crates/gpui-neovim). Add either to your project:
+
+```sh
+cargo add gpui-libghostty
+cargo add gpui-neovim
+```
+
 - `gpui-libghostty` hosts a command in Ghostty's native Metal renderer on
   macOS or its OpenGL renderer in a native Wayland subsurface on Linux, and
   forwards GPUI keyboard, key-repeat, mouse, scroll, focus, resize, and
@@ -72,11 +80,11 @@ directory must contain every package required by the vendored Ghostty source.
 
 ```toml
 [dependencies]
-gpui-ghostty = { package = "gpui-libghostty", version = "0.2" }
+gpui-libghostty = "0.2"
 ```
 
 ```rust,ignore
-use gpui_ghostty::{Terminal, TerminalOptions};
+use gpui_libghostty::{Terminal, TerminalOptions};
 
 let terminal = Terminal::spawn(
     TerminalOptions::new("bash", project_directory),
@@ -89,7 +97,7 @@ let terminal = Terminal::spawn(
 Ghostty configuration, or application-owned colors:
 
 ```rust,ignore
-use gpui_ghostty::{
+use gpui_libghostty::{
     TerminalColor, TerminalConfiguration, TerminalOptions, TerminalTheme,
 };
 
@@ -127,7 +135,7 @@ unsafe pastes, and writes configured with `clipboard-write = ask`. Explicit Ghos
 
 ```rust,ignore
 use std::sync::Arc;
-use gpui_ghostty::ClipboardOperation;
+use gpui_libghostty::ClipboardOperation;
 
 // Example application policy: permit writes that Ghostty asks to confirm,
 // but deny protected reads and unsafe pastes.
