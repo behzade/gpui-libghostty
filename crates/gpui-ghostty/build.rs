@@ -24,6 +24,7 @@ const GHOSTTY_BUILD_OPTIONS: &[&str] = &[
     "-Dsentry=false",
     "-Doptimize=ReleaseFast",
 ];
+const LINUX_GHOSTTY_BUILD_OPTIONS: &[&str] = &["-Drenderer=opengl", "-Dcpu=baseline"];
 
 fn main() {
     println!("cargo:rerun-if-changed=shim/ghostty_surface.m");
@@ -172,7 +173,7 @@ fn build_ghostty_linux(
     use_system_package_dir(&mut command);
     let status = command
         .args(GHOSTTY_BUILD_OPTIONS)
-        .arg("-Drenderer=opengl")
+        .args(LINUX_GHOSTTY_BUILD_OPTIONS)
         .status();
     if linked_package_cache {
         std::fs::remove_file(&source_package_cache)
@@ -236,7 +237,9 @@ fn linux_native_fingerprint(source: &Path, zig: &OsStr) -> String {
     for option in GHOSTTY_BUILD_OPTIONS {
         hash.write_field(option.as_bytes());
     }
-    hash.write_field(b"-Drenderer=opengl");
+    for option in LINUX_GHOSTTY_BUILD_OPTIONS {
+        hash.write_field(option.as_bytes());
+    }
     hash_tree(source, source, &mut hash);
     format!("{:032x}", hash.finish())
 }
