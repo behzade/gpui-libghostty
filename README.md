@@ -73,6 +73,25 @@ let mut options = TerminalOptions::new("bash", project_directory);
 options.configuration = TerminalConfiguration::UserDefault;
 ```
 
+### Live theming
+
+`Terminal::update_theme` reapplies colors to a running terminal without
+restarting its process, which lets an application repaint its terminals when the
+user switches themes:
+
+```rust,ignore
+use gpui_libghostty::{TerminalColor, TerminalTheme};
+
+let theme = TerminalTheme::new(
+    TerminalColor::new(0x1d, 0x20, 0x21),
+    TerminalColor::new(0xd5, 0xc4, 0xa1),
+    palette,
+);
+terminal.update(cx, |terminal, _| {
+    let _ = terminal.update_theme(theme);
+});
+```
+
 ### Clipboard approval
 
 Clipboard operations requiring approval are denied unless `clipboard_approval`

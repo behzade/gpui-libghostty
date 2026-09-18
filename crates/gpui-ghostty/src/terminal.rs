@@ -110,6 +110,34 @@ fn write_theme_config(theme: &TerminalTheme) -> Result<tempfile::NamedTempFile, 
     Ok(file)
 }
 
+/// Holds the temporary theme file a surface was configured from so a later
+/// update can rebuild the same configuration with new colors.
+pub struct TerminalThemeState {
+    load_user_config: bool,
+    file: Option<tempfile::NamedTempFile>,
+}
+
+impl TerminalThemeState {
+    /// Rebuilds the running surface's configuration with `theme`.
+    ///
+    /// Ghostty re-derives its render state during the call, so the temporary
+    /// theme file is only kept alive until the next update replaces it.
+    pub fn apply(
+        &mut self,
+        surface: &mut NativeSurface,
+        theme: &TerminalTheme,
+    ) -> Result<(), String> {
+        let file = write_theme_config(theme)?;
+        let path = CString::new(file.path().to_string_lossy().as_bytes())
+            .map_err(|_| "temporary Ghostty theme path contains a NUL byte".to_owned())?;
+        if !surface.update_theme(self.load_user_config, Some(path.as_c_str())) {
+            return Err("libghostty could not apply the terminal theme".to_owned());
+        }
+        self.file = Some(file);
+        Ok(())
+    }
+}
+
 /// Creates the native child used by the generated adapter.
 ///
 /// # Safety
@@ -119,7 +147,7 @@ pub unsafe fn spawn_surface(
     options: TerminalOptions,
     window: &(impl raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle),
     scale_factor: f64,
-) -> Result<NativeSurface, String> {
+) -> Result<(NativeSurface, TerminalThemeState), String> {
     let TerminalOptions {
         command,
         working_directory,
@@ -163,7 +191,13 @@ pub unsafe fn spawn_surface(
     }
     .map_err(|error| format!("initialize libghostty: {error}"))?;
     surface.wakeup().init_clipboard_approval(clipboard_approval);
-    Ok(surface)
+    Ok((
+        surface,
+        TerminalThemeState {
+            load_user_config,
+            file: theme_config,
+        },
+    ))
 }
 
 impl NativeSurface {

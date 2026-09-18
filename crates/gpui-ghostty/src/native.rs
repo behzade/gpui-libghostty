@@ -240,6 +240,12 @@ mod platform {
         fn gpui_ghostty_surface_free(surface: *mut RawSurface);
         fn gpui_ghostty_surface_tick(surface: *mut RawSurface);
         fn gpui_ghostty_surface_is_alive(surface: *const RawSurface) -> bool;
+        fn gpui_ghostty_surface_frame_count(surface: *mut RawSurface) -> u64;
+        fn gpui_ghostty_surface_update_theme(
+            surface: *mut RawSurface,
+            load_user_config: bool,
+            theme_config_path: *const c_char,
+        ) -> bool;
         fn gpui_ghostty_surface_snapshot(
             surface: *mut RawSurface,
             pixels: *mut *mut u8,
@@ -256,6 +262,7 @@ mod platform {
             height: f64,
         );
         fn gpui_ghostty_surface_set_visible(surface: *mut RawSurface, visible: bool);
+        fn gpui_ghostty_surface_set_hidden_rendering(surface: *mut RawSurface, rendered: bool);
         fn gpui_ghostty_surface_set_focus(surface: *mut RawSurface, focused: bool);
         fn gpui_ghostty_surface_key(
             surface: *mut RawSurface,
@@ -346,9 +353,37 @@ mod platform {
             unsafe { gpui_ghostty_surface_tick(self.raw.as_ptr()) }
         }
 
+        /// Number of frames Ghostty has drawn for this surface. It advances once
+        /// per rendered frame, so a caller can wait for a configuration change to
+        /// reach the screen without guessing a delay.
+        pub fn frame_count(&self) -> u64 {
+            // SAFETY: `raw` is valid for the lifetime of the surface.
+            unsafe { gpui_ghostty_surface_frame_count(self.raw.as_ptr()) }
+        }
+
         pub fn is_alive(&self) -> bool {
             // SAFETY: `raw` remains valid for this value's lifetime.
             unsafe { gpui_ghostty_surface_is_alive(self.raw.as_ptr()) }
+        }
+
+        /// Rebuilds the running surface's configuration from the given sources.
+        ///
+        /// Ghostty derives everything it needs before returning, so the theme file
+        /// may be removed once this call completes.
+        pub(crate) fn update_theme(
+            &mut self,
+            load_user_config: bool,
+            theme_config_path: Option<&CStr>,
+        ) -> bool {
+            // SAFETY: `raw` is valid, the optional path outlives the call, and the
+            // shim copies the derived configuration before it returns.
+            unsafe {
+                gpui_ghostty_surface_update_theme(
+                    self.raw.as_ptr(),
+                    load_user_config,
+                    theme_config_path.map_or(std::ptr::null(), CStr::as_ptr),
+                )
+            }
         }
 
         pub(crate) fn snapshot(&mut self) -> Result<NativeSnapshot, String> {
@@ -399,6 +434,13 @@ mod platform {
         pub fn set_focus(&mut self, focused: bool) {
             // SAFETY: `raw` is valid and this is called from the AppKit main thread.
             unsafe { gpui_ghostty_surface_set_focus(self.raw.as_ptr(), focused) }
+        }
+
+        /// Keeps the renderer running while the surface's view is hidden, so a
+        /// caller that presents a captured frame can read a current one back.
+        pub fn set_hidden_rendering(&mut self, rendered: bool) {
+            // SAFETY: `raw` is valid and the value crosses the ABI by value.
+            unsafe { gpui_ghostty_surface_set_hidden_rendering(self.raw.as_ptr(), rendered) }
         }
 
         pub fn key(
@@ -519,11 +561,22 @@ impl NativeSurface {
     pub fn is_alive(&self) -> bool {
         false
     }
+    pub(crate) fn update_theme(
+        &mut self,
+        _load_user_config: bool,
+        _theme_config_path: Option<&CStr>,
+    ) -> bool {
+        false
+    }
     pub(crate) fn snapshot(&mut self) -> Result<NativeSnapshot, String> {
         Err("native terminal snapshots require macOS or Wayland".to_owned())
     }
     pub fn set_frame(&mut self, _x: f64, _y: f64, _width: f64, _height: f64, _scale_factor: f64) {}
     pub fn set_visible(&mut self, _visible: bool) {}
+    pub fn set_hidden_rendering(&mut self, _rendered: bool) {}
+    pub fn frame_count(&self) -> u64 {
+        0
+    }
     pub fn set_focus(&mut self, _focused: bool) {}
     pub fn key(
         &mut self,

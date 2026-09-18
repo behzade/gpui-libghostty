@@ -32,6 +32,12 @@ unsafe extern "C" {
     fn gpui_ghostty_surface_linux_free(surface: *mut RawSurface);
     fn gpui_ghostty_surface_linux_tick(surface: *mut RawSurface);
     fn gpui_ghostty_surface_linux_is_alive(surface: *const RawSurface) -> bool;
+    fn gpui_ghostty_surface_linux_frame_count(surface: *mut RawSurface) -> u64;
+    fn gpui_ghostty_surface_linux_update_theme(
+        surface: *mut RawSurface,
+        load_user_config: bool,
+        theme_config_path: *const c_char,
+    ) -> bool;
     fn gpui_ghostty_surface_linux_snapshot(
         surface: *mut RawSurface,
         pixels: *mut *mut u8,
@@ -61,6 +67,7 @@ unsafe extern "C" {
         scale_factor: f64,
     );
     fn gpui_ghostty_surface_linux_set_visible(surface: *mut RawSurface, visible: bool);
+    fn gpui_ghostty_surface_linux_set_hidden_rendering(surface: *mut RawSurface, rendered: bool);
     fn gpui_ghostty_surface_linux_set_focus(surface: *mut RawSurface, focused: bool);
     fn gpui_ghostty_surface_linux_key(
         surface: *mut RawSurface,
@@ -167,6 +174,34 @@ impl NativeSurface {
         unsafe { gpui_ghostty_surface_linux_is_alive(self.raw.as_ptr()) }
     }
 
+    /// Number of frames Ghostty has drawn for this surface. It advances once per
+    /// rendered frame, so a caller can wait for a configuration change to reach
+    /// the screen without guessing a delay.
+    pub fn frame_count(&self) -> u64 {
+        // SAFETY: `raw` is valid for the lifetime of the surface.
+        unsafe { gpui_ghostty_surface_linux_frame_count(self.raw.as_ptr()) }
+    }
+
+    /// Rebuilds the running surface's configuration from the given sources.
+    ///
+    /// Ghostty derives everything it needs before returning, so the theme file
+    /// may be removed once this call completes.
+    pub(crate) fn update_theme(
+        &mut self,
+        load_user_config: bool,
+        theme_config_path: Option<&CStr>,
+    ) -> bool {
+        // SAFETY: `raw` is uniquely owned, the optional path outlives the call, and
+        // the shim copies the derived configuration before it returns.
+        unsafe {
+            gpui_ghostty_surface_linux_update_theme(
+                self.raw.as_ptr(),
+                load_user_config,
+                theme_config_path.map_or(std::ptr::null(), CStr::as_ptr),
+            )
+        }
+    }
+
     pub(crate) fn snapshot(&mut self) -> Result<NativeSnapshot, String> {
         let mut pixels = std::ptr::null_mut();
         let mut width = 0;
@@ -229,6 +264,13 @@ impl NativeSurface {
 
     pub fn set_focus(&mut self, focused: bool) {
         unsafe { gpui_ghostty_surface_linux_set_focus(self.raw.as_ptr(), focused) }
+    }
+
+    /// Keeps the renderer running while the surface's view is hidden, so a caller
+    /// that presents a captured frame can read a current one back.
+    pub fn set_hidden_rendering(&mut self, rendered: bool) {
+        // SAFETY: `raw` is uniquely owned and the value crosses the ABI by value.
+        unsafe { gpui_ghostty_surface_linux_set_hidden_rendering(self.raw.as_ptr(), rendered) }
     }
 
     pub fn key(

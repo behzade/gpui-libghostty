@@ -19,5 +19,5 @@ pub use terminal::{TerminalColor, TerminalConfiguration, TerminalOptions, Termin
 #[doc(hidden)]
 pub mod __private {
     pub use crate::native::{KeyAction, Modifiers, MouseButton, MouseState, NativeSurface};
-    pub use crate::terminal::spawn_surface;
+    pub use crate::terminal::{TerminalThemeState, spawn_surface};
 }
