@@ -106,7 +106,10 @@ pub struct NativeSurface {
 }
 
 impl NativeSurface {
-    pub fn new(
+    /// # Safety
+    /// The parent Wayland surface and display must outlive this surface.
+    /// Create, use, and drop it on the window's UI thread.
+    pub(crate) unsafe fn new(
         display: Option<NonNull<c_void>>,
         parent_surface: NonNull<c_void>,
         scale_factor: f64,
@@ -164,7 +167,7 @@ impl NativeSurface {
         unsafe { gpui_ghostty_surface_linux_is_alive(self.raw.as_ptr()) }
     }
 
-    pub fn snapshot(&mut self) -> Result<NativeSnapshot, String> {
+    pub(crate) fn snapshot(&mut self) -> Result<NativeSnapshot, String> {
         let mut pixels = std::ptr::null_mut();
         let mut width = 0;
         let mut height = 0;
@@ -279,7 +282,7 @@ impl NativeSurface {
         }
     }
 
-    pub fn take_clipboard_read(&mut self) -> Option<ClipboardRead> {
+    pub(crate) fn take_clipboard_read(&mut self) -> Option<ClipboardRead> {
         let mut selection = false;
         let request = unsafe {
             gpui_ghostty_surface_linux_take_clipboard_read(self.raw.as_ptr(), &mut selection)
@@ -290,7 +293,7 @@ impl NativeSurface {
         })
     }
 
-    pub fn complete_clipboard_read(&mut self, request: ClipboardRead, text: &CStr) {
+    pub(crate) fn complete_clipboard_read(&mut self, request: ClipboardRead, text: &CStr) {
         unsafe {
             gpui_ghostty_surface_linux_complete_clipboard_read(
                 self.raw.as_ptr(),

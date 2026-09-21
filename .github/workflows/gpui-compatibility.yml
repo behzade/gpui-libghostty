@@ -1,0 +1,77 @@
+name: Upstream GPUI compatibility
+
+on:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Advisory workflow: deliberately not called by PR or release checks.
+jobs:
+  resolve:
+    name: Resolve upstream versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.resolve.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node .github/scripts/gpui-compat.mjs resolve
+
+  compatibility:
+    name: ${{ matrix.target.channel }} (${{ matrix.os }})
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        target: ${{ fromJSON(needs.resolve.outputs.targets) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/compat-build
+      CONSUMER: target/gpui-compat/${{ matrix.target.channel }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Prepare isolated consumer
+        env:
+          TARGET_JSON: ${{ toJSON(matrix.target) }}
+        run: node .github/scripts/gpui-compat.mjs prepare
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Record toolchain
+        run: |
+          rustc -Vv > "$CONSUMER/toolchain.txt"
+          cargo -V >> "$CONSUMER/toolchain.txt"
+          zig version >> "$CONSUMER/toolchain.txt"
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: bash .github/scripts/install-linux-deps.sh
+      - name: Resolve dependencies
+        run: cargo generate-lockfile --manifest-path "$CONSUMER/Cargo.toml"
+      - name: Test both components against resolved GPUI
+        run: cargo test --locked --manifest-path "$CONSUMER/Cargo.toml"
+      - name: Save reproduction files
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpui-compat-${{ matrix.target.channel }}-${{ matrix.os }}
+          path: ${{ env.CONSUMER }}
+          if-no-files-found: warn
+          retention-days: 30

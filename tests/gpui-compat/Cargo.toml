@@ -1,0 +1,17 @@
+[package]
+name = "gpui-compat"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+# Test fixture only: neither published library selects this GPUI distribution.
+chosen-ui = { package = "gpui-pre", version = "=0.3.4", default-features = false }
+terminal-library = { package = "gpui-libghostty", path = "../../crates/gpui-ghostty" }
+editor-library = { package = "gpui-neovim", path = "../../crates/gpui-neovim" }
+
+[dev-dependencies]
+gpui.workspace = true
+
+[lints]
+workspace = true

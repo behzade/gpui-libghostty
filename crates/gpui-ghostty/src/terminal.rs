@@ -1,22 +1,14 @@
+//! GPUI-independent terminal configuration and input translation.
+use crate::clipboard::ClipboardApprovalCallback;
+use crate::native::{KeyAction, Modifiers, NativeSurface};
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::{
     ffi::{CString, c_void},
     fmt,
     io::Write as _,
     path::PathBuf,
     ptr::NonNull,
-    sync::Arc,
 };
-
-use gpui::{
-    AppContext as _, Bounds, ClipboardItem, Context, Entity, FocusHandle, InteractiveElement as _,
-    IntoElement, KeyDownEvent, KeyUpEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement as _, Pixels, Render, RenderImage, ScrollDelta, ScrollWheelEvent, Styled as _,
-    Subscription, Task, Window, canvas, div,
-};
-use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
-
-use crate::clipboard::ClipboardApprovalCallback;
-use crate::native::{KeyAction, Modifiers, MouseButton, MouseState, NativeSurface};
 
 /// An opaque terminal color without an alpha channel.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -118,239 +110,86 @@ fn write_theme_config(theme: &TerminalTheme) -> Result<tempfile::NamedTempFile, 
     Ok(file)
 }
 
-/// A GPUI entity backed by Ghostty's native Metal or Wayland/OpenGL surface.
-pub struct Terminal {
-    surface: NativeSurface,
-    focus: FocusHandle,
-    bounds: Bounds<Pixels>,
-    tick_task: Option<Task<()>>,
-    visible: bool,
-    window_focused: bool,
-    _subscriptions: Vec<Subscription>,
-}
-
-impl Terminal {
-    /// Spawns the configured command and attaches its native surface to `window`.
-    pub fn spawn<T: 'static>(
-        options: TerminalOptions,
-        window: &mut Window,
-        cx: &mut Context<T>,
-    ) -> Result<Entity<Self>, String> {
-        let TerminalOptions {
-            command,
-            working_directory,
-            focus_on_spawn,
-            configuration,
-            clipboard_approval,
-        } = options;
-        let working_directory = CString::new(working_directory.to_string_lossy().as_bytes())
-            .map_err(|_| {
-                format!(
-                    "terminal working directory contains a NUL byte: {}",
-                    working_directory.display()
-                )
-            })?;
-        let command =
-            CString::new(command).map_err(|_| "terminal command contains a NUL byte".to_owned())?;
-        let (load_user_config, theme_config) = match configuration {
-            TerminalConfiguration::Default => (false, None),
-            TerminalConfiguration::UserDefault => (true, None),
-            TerminalConfiguration::Custom(theme) => (false, Some(write_theme_config(&theme)?)),
-            TerminalConfiguration::UserDefaultWithOverride(theme) => {
-                (true, Some(write_theme_config(&theme)?))
-            }
-        };
-        let theme_config_path = theme_config
-            .as_ref()
-            .map(|file| CString::new(file.path().to_string_lossy().as_bytes()))
-            .transpose()
-            .map_err(|_| "temporary Ghostty theme path contains a NUL byte".to_owned())?;
-        let native_window = native_window(window)?;
-        let surface = NativeSurface::new(
+/// Creates the native child used by the generated adapter.
+///
+/// # Safety
+/// Call on the window's UI thread. The parent window and display must outlive
+/// the surface, and the surface must be used and dropped on that same thread.
+pub unsafe fn spawn_surface(
+    options: TerminalOptions,
+    window: &(impl raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle),
+    scale_factor: f64,
+) -> Result<NativeSurface, String> {
+    let TerminalOptions {
+        command,
+        working_directory,
+        focus_on_spawn: _,
+        configuration,
+        clipboard_approval,
+    } = options;
+    let working_directory =
+        CString::new(working_directory.to_string_lossy().as_bytes()).map_err(|_| {
+            format!(
+                "terminal working directory contains a NUL byte: {}",
+                working_directory.display()
+            )
+        })?;
+    let command =
+        CString::new(command).map_err(|_| "terminal command contains a NUL byte".to_owned())?;
+    let (load_user_config, theme_config) = match configuration {
+        TerminalConfiguration::Default => (false, None),
+        TerminalConfiguration::UserDefault => (true, None),
+        TerminalConfiguration::Custom(theme) => (false, Some(write_theme_config(&theme)?)),
+        TerminalConfiguration::UserDefaultWithOverride(theme) => {
+            (true, Some(write_theme_config(&theme)?))
+        }
+    };
+    let theme_config_path = theme_config
+        .as_ref()
+        .map(|file| CString::new(file.path().to_string_lossy().as_bytes()))
+        .transpose()
+        .map_err(|_| "temporary Ghostty theme path contains a NUL byte".to_owned())?;
+    let native_window = native_window(window)?;
+    let surface = unsafe {
+        NativeSurface::new(
             native_window.display,
             native_window.surface,
-            f64::from(window.scale_factor()),
+            scale_factor,
             working_directory,
             command,
             load_user_config,
             theme_config_path.as_deref(),
         )
-        .map_err(|error| format!("initialize libghostty: {error}"))?;
-        surface.wakeup().init_clipboard_approval(clipboard_approval);
-        let focus = cx.focus_handle();
-        if focus_on_spawn {
-            focus.focus(window, cx);
-        }
-        Ok(cx.new(|cx| {
-            let subscriptions = vec![
-                cx.on_focus(&focus, window, |terminal: &mut Self, window, _| {
-                    terminal.sync_focus(window)
-                }),
-                cx.on_blur(&focus, window, |terminal: &mut Self, window, _| {
-                    terminal.sync_focus(window)
-                }),
-                cx.observe_window_activation(window, |terminal: &mut Self, window, _| {
-                    terminal.sync_focus(window)
-                }),
-            ];
-            let mut terminal = Self {
-                surface,
-                focus,
-                bounds: Bounds::default(),
-                tick_task: None,
-                visible: true,
-                window_focused: false,
-                _subscriptions: subscriptions,
-            };
-            terminal.sync_focus(window);
-            terminal
-        }))
     }
+    .map_err(|error| format!("initialize libghostty: {error}"))?;
+    surface.wakeup().init_clipboard_approval(clipboard_approval);
+    Ok(surface)
+}
 
-    pub fn is_alive(&self) -> bool {
-        self.surface.is_alive()
-    }
-
-    pub fn focus<T>(&mut self, window: &mut Window, cx: &mut Context<T>) {
-        self.set_visible(true);
-        self.focus.focus(window, cx);
-        self.sync_focus(window);
-    }
-
-    /// Shows or hides the native child without changing GPUI keyboard focus.
-    /// Hidden surfaces remain hidden across layout, resize, and scale changes.
-    pub fn set_visible(&mut self, visible: bool) {
-        self.visible = visible;
-        self.surface.set_visible(visible);
-        self.surface.set_focus(self.visible && self.window_focused);
-    }
-
-    fn sync_focus(&mut self, window: &Window) {
-        self.window_focused = self.focus.is_focused(window) && window.is_window_active();
-        self.surface.set_focus(self.visible && self.window_focused);
-    }
-
-    /// Captures the last completed native frame for temporary GPUI compositing.
-    ///
-    /// This performs a synchronous GPU readback and should only be used for
-    /// infrequent transitions such as presenting a modal over the terminal.
-    /// Render the image at the terminal's logical bounds because its pixels use
-    /// the native surface's display scale.
-    pub fn snapshot(&mut self) -> Result<Arc<RenderImage>, String> {
-        let snapshot = self.surface.snapshot()?;
-        let image = image::RgbaImage::from_raw(snapshot.width, snapshot.height, snapshot.bgra)
-            .ok_or_else(|| "native terminal snapshot has an invalid byte length".to_owned())?;
-        Ok(Arc::new(RenderImage::new(smallvec::smallvec![
-            image::Frame::new(image)
-        ])))
-    }
-
-    fn start_ticking(&mut self, cx: &mut Context<Self>) {
-        if self.tick_task.is_some() {
-            return;
-        }
-        self.surface.tick();
-        self.service_clipboard(cx);
-        let wakeup = self.surface.wakeup();
-        let terminal = cx.entity().downgrade();
-        self.tick_task = Some(cx.spawn(async move |_, cx| {
-            loop {
-                wakeup.wait().await;
-                let updated = terminal.update(cx, |terminal, cx| {
-                    // Ghostty draws its native child during the tick; GPUI has no
-                    // terminal pixels to repaint for this wakeup.
-                    terminal.surface.tick();
-                    terminal.service_clipboard(cx);
-                });
-                if updated.is_err() {
-                    break;
-                }
-            }
-        }));
-    }
-
-    fn service_clipboard(&mut self, cx: &mut Context<Self>) {
-        if let Some(request) = self.surface.take_clipboard_read() {
-            let item = if request.selection {
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                {
-                    cx.read_from_primary()
-                }
-                #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-                {
-                    cx.read_from_clipboard()
-                }
-            } else {
-                cx.read_from_clipboard()
-            };
-            let mut text = item.and_then(|item| item.text()).unwrap_or_default();
-            if text.contains('\0') {
-                text = text.replace('\0', "�");
-            }
-            if let Ok(text) = CString::new(text) {
-                self.surface.complete_clipboard_read(request, &text);
-            }
-        }
-
-        while let Some(write) = self.surface.take_clipboard_write() {
-            let item = ClipboardItem::new_string(write.text);
-            if write.selection {
-                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                cx.write_to_primary(item);
-                #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
-                cx.write_to_clipboard(item);
-            } else {
-                cx.write_to_clipboard(item);
-            }
-        }
-    }
-
-    fn update_frame(&mut self, bounds: Bounds<Pixels>, scale_factor: f64) {
-        self.bounds = bounds;
-        self.surface.set_frame(
-            f64::from(f32::from(bounds.origin.x)),
-            f64::from(f32::from(bounds.origin.y)),
-            f64::from(f32::from(bounds.size.width)),
-            f64::from(f32::from(bounds.size.height)),
-            scale_factor,
-        );
-    }
-
-    fn key_down(&mut self, event: &KeyDownEvent) {
-        self.send_key(
-            if event.is_held {
-                KeyAction::Repeat
-            } else {
-                KeyAction::Press
-            },
-            &event.keystroke,
-        );
-    }
-
-    fn key_up(&mut self, event: &KeyUpEvent) {
-        self.send_key(KeyAction::Release, &event.keystroke);
-    }
-
-    fn send_key(&mut self, action: KeyAction, keystroke: &gpui::Keystroke) {
-        let Some(key) = native_key(&keystroke.key) else {
+impl NativeSurface {
+    pub fn send_key(
+        &mut self,
+        action: KeyAction,
+        key: &str,
+        text: Option<&str>,
+        modifiers: Modifiers,
+    ) {
+        let Some(key) = native_key(key) else {
             if matches!(action, KeyAction::Press | KeyAction::Repeat)
-                && !keystroke.modifiers.control
-                && !keystroke.modifiers.alt
-                && !keystroke.modifiers.platform
-                && let Some(text) = keystroke.key_char.as_deref()
+                && !modifiers.contains(Modifiers::CONTROL)
+                && !modifiers.contains(Modifiers::ALT)
+                && !modifiers.contains(Modifiers::SUPER)
+                && let Some(text) = text
                 && let Ok(text) = CString::new(text)
             {
-                self.surface.text(&text);
+                self.text(&text);
             }
             return;
         };
-        let text = keystroke
-            .key_char
-            .as_deref()
-            .and_then(|text| CString::new(text).ok());
+        let text = text.and_then(|text| CString::new(text).ok());
         let (active_modifiers, consumed_modifiers) =
-            key_modifiers(keystroke.modifiers, key.implied_shift, text.is_some());
-        let _ = self.surface.key(
+            key_modifiers(modifiers, key.implied_shift, text.is_some());
+        let _ = self.key(
             action,
             active_modifiers,
             consumed_modifiers,
@@ -360,115 +199,31 @@ impl Terminal {
         );
     }
 
-    fn mouse_position(&mut self, position: gpui::Point<Pixels>, modifiers: gpui::Modifiers) {
-        let x = f64::from(f32::from(position.x - self.bounds.origin.x));
-        let y = f64::from(f32::from(position.y - self.bounds.origin.y));
-        self.surface.mouse_position(x, y, modifiers.into());
+    pub fn snapshot_frame(&mut self) -> Result<image::Frame, String> {
+        let snapshot = self.snapshot()?;
+        let image = image::RgbaImage::from_raw(snapshot.width, snapshot.height, snapshot.bgra)
+            .ok_or_else(|| "native terminal snapshot has an invalid byte length".to_owned())?;
+        Ok(image::Frame::new(image))
     }
 
-    fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus.focus(window, cx);
-        self.sync_focus(window);
-        self.mouse_position(event.position, event.modifiers);
-        self.surface.mouse_button(
-            MouseState::Press,
-            event.button.into(),
-            event.modifiers.into(),
-        );
-    }
-
-    fn mouse_up(&mut self, event: &MouseUpEvent) {
-        self.mouse_position(event.position, event.modifiers);
-        self.surface.mouse_button(
-            MouseState::Release,
-            event.button.into(),
-            event.modifiers.into(),
-        );
-    }
-
-    fn scroll(&mut self, event: &ScrollWheelEvent) {
-        self.mouse_position(event.position, event.modifiers);
-        let (x, y, precision) = match event.delta {
-            ScrollDelta::Pixels(delta) => (
-                f64::from(f32::from(delta.x)),
-                f64::from(f32::from(delta.y)),
-                true,
-            ),
-            ScrollDelta::Lines(delta) => (f64::from(delta.x), f64::from(delta.y), false),
+    /// Services one read without exposing the native request. The callback gets
+    /// the selection flag; completion always uses the originating surface.
+    ///
+    /// Callers cannot obtain or forge a raw request:
+    /// ```compile_fail
+    /// use gpui_libghostty::__private::NativeSurface;
+    /// fn forge(surface: &mut NativeSurface) {
+    ///     let mut request = surface.take_clipboard_read().unwrap();
+    ///     request.request = std::ptr::NonNull::dangling();
+    /// }
+    /// ```
+    pub fn service_clipboard_read(&mut self, read: impl FnOnce(bool) -> String) {
+        let Some(request) = self.take_clipboard_read() else {
+            return;
         };
-        self.surface.mouse_scroll(x, y, precision);
-    }
-}
-
-impl Render for Terminal {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_focus(window);
-        self.start_ticking(cx);
-        let terminal = cx.entity().downgrade();
-        div()
-            .key_context("Terminal")
-            .track_focus(&self.focus)
-            .size_full()
-            .min_h_0()
-            .child(
-                canvas(
-                    move |bounds, window, cx| {
-                        let scale_factor = f64::from(window.scale_factor());
-                        let _ = terminal.update(cx, |terminal, _| {
-                            terminal.update_frame(bounds, scale_factor);
-                        });
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .size_full(),
-            )
-            .on_key_down(cx.listener(|terminal, event, _, _| terminal.key_down(event)))
-            .on_key_up(cx.listener(|terminal, event, _, _| terminal.key_up(event)))
-            .on_mouse_move(cx.listener(|terminal, event: &MouseMoveEvent, _, _| {
-                terminal.mouse_position(event.position, event.modifiers);
-            }))
-            .on_mouse_down(
-                gpui::MouseButton::Left,
-                cx.listener(|terminal, event, window, cx| terminal.mouse_down(event, window, cx)),
-            )
-            .on_mouse_down(
-                gpui::MouseButton::Middle,
-                cx.listener(|terminal, event, window, cx| terminal.mouse_down(event, window, cx)),
-            )
-            .on_mouse_down(
-                gpui::MouseButton::Right,
-                cx.listener(|terminal, event, window, cx| terminal.mouse_down(event, window, cx)),
-            )
-            .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(|terminal, event, _, _| terminal.mouse_up(event)),
-            )
-            .on_mouse_up(
-                gpui::MouseButton::Middle,
-                cx.listener(|terminal, event, _, _| terminal.mouse_up(event)),
-            )
-            .on_mouse_up(
-                gpui::MouseButton::Right,
-                cx.listener(|terminal, event, _, _| terminal.mouse_up(event)),
-            )
-            .on_scroll_wheel(cx.listener(|terminal, event, _, _| terminal.scroll(event)))
-    }
-}
-
-impl From<gpui::Modifiers> for Modifiers {
-    fn from(value: gpui::Modifiers) -> Self {
-        modifiers(value)
-    }
-}
-
-impl From<gpui::MouseButton> for MouseButton {
-    fn from(value: gpui::MouseButton) -> Self {
-        match value {
-            gpui::MouseButton::Left => Self::Left,
-            gpui::MouseButton::Right => Self::Right,
-            gpui::MouseButton::Middle => Self::Middle,
-            gpui::MouseButton::Navigate(_) => Self::Unknown,
+        let text = read(request.selection).replace('\0', "�");
+        if let Ok(text) = CString::new(text) {
+            self.complete_clipboard_read(request, &text);
         }
     }
 }
@@ -478,7 +233,9 @@ struct NativeWindow {
     surface: NonNull<c_void>,
 }
 
-fn native_window(window: &Window) -> Result<NativeWindow, String> {
+fn native_window(
+    window: &(impl raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle),
+) -> Result<NativeWindow, String> {
     let handle = raw_window_handle::HasWindowHandle::window_handle(window)
         .map_err(|error| format!("read native window handle: {error}"))?;
     match handle.as_raw() {
@@ -503,35 +260,20 @@ fn native_window(window: &Window) -> Result<NativeWindow, String> {
     }
 }
 
-fn modifiers(value: gpui::Modifiers) -> Modifiers {
-    let mut result = Modifiers::empty();
-    if value.shift {
-        result.insert(Modifiers::SHIFT);
-    }
-    if value.control {
-        result.insert(Modifiers::CONTROL);
-    }
-    if value.alt {
-        result.insert(Modifiers::ALT);
-    }
-    if value.platform {
-        result.insert(Modifiers::SUPER);
-    }
-    result
-}
-
 fn key_modifiers(
-    mut value: gpui::Modifiers,
+    mut value: Modifiers,
     implied_shift: bool,
     has_text: bool,
 ) -> (Modifiers, Modifiers) {
-    value.shift |= implied_shift;
-    let active = modifiers(value);
-    let mut consumed = Modifiers::empty();
-    if has_text && value.shift {
-        consumed.insert(Modifiers::SHIFT);
+    if implied_shift {
+        value.insert(Modifiers::SHIFT);
     }
-    (active, consumed)
+    let consumed = if has_text && value.contains(Modifiers::SHIFT) {
+        Modifiers::SHIFT
+    } else {
+        Modifiers::empty()
+    };
+    (value, consumed)
 }
 
 struct NativeKey {
@@ -819,8 +561,7 @@ mod tests {
         ] {
             let key = native_key(shifted).expect("shifted key should map");
             let base = native_key(unshifted).expect("base key should map");
-            let (active, consumed) =
-                key_modifiers(gpui::Modifiers::default(), key.implied_shift, true);
+            let (active, consumed) = key_modifiers(Modifiers::empty(), key.implied_shift, true);
             assert_eq!(key.keycode, base.keycode);
             assert_eq!(key.unshifted_codepoint, base.unshifted_codepoint);
             assert_eq!(active, Modifiers::SHIFT);
@@ -849,10 +590,7 @@ mod tests {
 
     #[test]
     fn shift_is_only_consumed_when_the_key_has_text() {
-        let modifiers = gpui::Modifiers {
-            shift: true,
-            ..Default::default()
-        };
+        let modifiers = Modifiers::SHIFT;
         let (active, consumed) = key_modifiers(modifiers, false, false);
         assert_eq!(active, Modifiers::SHIFT);
         assert_eq!(consumed, Modifiers::empty());

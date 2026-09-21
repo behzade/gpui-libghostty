@@ -1,20 +1,21 @@
-//! Embedded Neovim component for GPUI, rendered by [`gpui_ghostty`].
+//! Neovim control and a generated adapter for the application's GPUI.
+//!
+//! Call `gpui_neovim::bind_gpui!(gpui)` once in a shared module to define
+//! `NvimEditor` and `Terminal` against your application's GPUI dependency.
 
 use std::{
     io::Read as _,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::atomic::{AtomicU64, Ordering},
     thread,
     time::{Duration, Instant},
 };
 
-use gpui::{App, Context, Entity, IntoElement, Render, RenderImage, Task, Window};
-use gpui_ghostty::{ClipboardApprovalCallback, Terminal, TerminalOptions};
+use gpui_ghostty::{ClipboardApprovalCallback, TerminalOptions};
 use wait_timeout::ChildExt as _;
+
+mod adapter;
 
 static NEXT_SOCKET_ID: AtomicU64 = AtomicU64::new(1);
 const DEFAULT_REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -48,22 +49,18 @@ impl NvimOptions {
     }
 }
 
-/// A Neovim process hosted inside a [`Terminal`].
-pub struct NvimEditor {
-    project: PathBuf,
-    path: PathBuf,
+/// Implementation details shared with the generated adapter.
+#[doc(hidden)]
+pub struct NvimSession {
+    pub project: PathBuf,
+    pub path: PathBuf,
     socket: PathBuf,
     executable: PathBuf,
-    remote_timeout: Duration,
-    terminal: Entity<Terminal>,
+    timeout: Duration,
 }
 
-impl NvimEditor {
-    pub fn spawn<T: 'static>(
-        options: NvimOptions,
-        window: &mut Window,
-        cx: &mut Context<T>,
-    ) -> Result<Self, String> {
+impl NvimSession {
+    pub fn new(options: NvimOptions) -> (Self, TerminalOptions) {
         let socket = socket_path();
         let command = nvim_command(
             &options.executable,
@@ -71,79 +68,56 @@ impl NvimEditor {
             &options.initial_file,
             options.initial_line,
         );
-        let mut terminal_options = TerminalOptions::new(command, options.project.clone());
-        terminal_options.clipboard_approval = options.clipboard_approval;
-        let terminal = Terminal::spawn(terminal_options, window, cx)?;
-        Ok(Self {
-            project: options.project,
-            path: options.initial_file,
-            socket,
-            executable: options.executable,
-            remote_timeout: options.remote_timeout,
+        let mut terminal = TerminalOptions::new(command, options.project.clone());
+        terminal.clipboard_approval = options.clipboard_approval;
+        (
+            Self {
+                project: options.project,
+                path: options.initial_file,
+                socket,
+                executable: options.executable,
+                timeout: options.remote_timeout,
+            },
             terminal,
-        })
+        )
     }
 
-    pub fn project(&self) -> &Path {
-        &self.project
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn is_alive(&self, cx: &App) -> bool {
-        self.terminal.read(cx).is_alive()
-    }
-
-    pub fn focus<T>(&mut self, window: &mut Window, cx: &mut Context<T>) {
-        self.terminal
-            .update(cx, |terminal, cx| terminal.focus(window, cx));
-    }
-
-    pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        self.terminal
-            .update(cx, |terminal, _| terminal.set_visible(visible));
-    }
-
-    /// Captures Neovim's last completed native frame for temporary GPUI compositing.
-    pub fn snapshot(&mut self, cx: &mut Context<Self>) -> Result<Arc<RenderImage>, String> {
-        self.terminal.update(cx, |terminal, _| terminal.snapshot())
-    }
-
-    /// Opens `path` in the existing Neovim server without blocking the UI thread.
-    pub fn open_file(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<Result<(), String>> {
-        self.open_file_at_line(path, None, cx)
-    }
-
-    /// Opens `path`, places the cursor at `line`, and completes when Neovim accepts the request.
-    pub fn open_file_at_line(
-        &mut self,
-        path: PathBuf,
-        line: Option<u64>,
-        cx: &mut Context<Self>,
-    ) -> Task<Result<(), String>> {
-        if !self.terminal.read(cx).is_alive() {
-            return Task::ready(Err("the embedded Neovim process has exited".to_owned()));
+    pub fn open_request(&self, path: &Path, line: Option<u64>) -> RemoteRequest {
+        RemoteRequest {
+            executable: self.executable.clone(),
+            project: self.project.clone(),
+            socket: self.socket.clone(),
+            timeout: self.timeout,
+            expression: open_file_expression(path, line),
         }
-
-        let executable = self.executable.clone();
-        let project = self.project.clone();
-        let socket = self.socket.clone();
-        let timeout = self.remote_timeout;
-        let expression = open_file_expression(&path, line);
-        let request = cx
-            .background_executor()
-            .spawn(async move { run_remote(&executable, &project, &socket, &expression, timeout) });
-
-        cx.spawn(async move |editor, cx| {
-            request.await?;
-            editor
-                .update(cx, |editor, _| editor.path = path)
-                .map_err(|_| "the embedded Neovim editor was dropped".to_owned())?;
-            Ok(())
-        })
     }
+}
+
+/// Owned request that runs on the application's background executor.
+#[doc(hidden)]
+pub struct RemoteRequest {
+    executable: PathBuf,
+    project: PathBuf,
+    socket: PathBuf,
+    timeout: Duration,
+    expression: String,
+}
+
+impl RemoteRequest {
+    pub fn run(self) -> Result<(), String> {
+        run_remote(
+            &self.executable,
+            &self.project,
+            &self.socket,
+            &self.expression,
+            self.timeout,
+        )
+    }
+}
+
+#[doc(hidden)]
+pub mod __private {
+    pub use gpui_ghostty as ghostty;
 }
 
 fn run_remote(
@@ -278,12 +252,6 @@ fn open_file_expression(path: &Path, line: Option<u64>) -> String {
     match line {
         Some(line) => format!("[{edit}, cursor({line}, 1)]"),
         None => edit,
-    }
-}
-
-impl Render for NvimEditor {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.terminal.clone()
     }
 }
 

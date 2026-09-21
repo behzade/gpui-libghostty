@@ -299,9 +299,10 @@ mod platform {
     impl NativeSurface {
         /// Creates a Ghostty-rendered child view attached to an AppKit `NSView`.
         ///
-        /// The caller must invoke this on the AppKit main thread and keep the parent
-        /// view alive until this value is dropped.
-        pub fn new(
+        /// # Safety
+        /// The parent view must remain valid until this surface is dropped.
+        /// Create, use, and drop it on the AppKit main thread.
+        pub(crate) unsafe fn new(
             _display: Option<NonNull<c_void>>,
             parent_view: NonNull<c_void>,
             _scale_factor: f64,
@@ -350,7 +351,7 @@ mod platform {
             unsafe { gpui_ghostty_surface_is_alive(self.raw.as_ptr()) }
         }
 
-        pub fn snapshot(&mut self) -> Result<NativeSnapshot, String> {
+        pub(crate) fn snapshot(&mut self) -> Result<NativeSnapshot, String> {
             let mut pixels = std::ptr::null_mut();
             let mut width = 0;
             let mut height = 0;
@@ -455,11 +456,11 @@ mod platform {
             }
         }
 
-        pub fn take_clipboard_read(&mut self) -> Option<ClipboardRead> {
+        pub(crate) fn take_clipboard_read(&mut self) -> Option<ClipboardRead> {
             None
         }
 
-        pub fn complete_clipboard_read(&mut self, _request: ClipboardRead, _text: &CStr) {}
+        pub(crate) fn complete_clipboard_read(&mut self, _request: ClipboardRead, _text: &CStr) {}
 
         pub fn take_clipboard_write(&mut self) -> Option<ClipboardWrite> {
             None
@@ -497,7 +498,9 @@ pub struct NativeSurface;
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 impl NativeSurface {
-    pub fn new(
+    /// # Safety
+    /// The parent window and display must outlive the surface on their UI thread.
+    pub(crate) unsafe fn new(
         _display: Option<NonNull<c_void>>,
         _parent_view: NonNull<c_void>,
         _scale_factor: f64,
@@ -516,7 +519,7 @@ impl NativeSurface {
     pub fn is_alive(&self) -> bool {
         false
     }
-    pub fn snapshot(&mut self) -> Result<NativeSnapshot, String> {
+    pub(crate) fn snapshot(&mut self) -> Result<NativeSnapshot, String> {
         Err("native terminal snapshots require macOS or Wayland".to_owned())
     }
     pub fn set_frame(&mut self, _x: f64, _y: f64, _width: f64, _height: f64, _scale_factor: f64) {}
@@ -543,19 +546,19 @@ impl NativeSurface {
     ) {
     }
     pub fn mouse_scroll(&mut self, _x: f64, _y: f64, _precision: bool) {}
-    pub fn take_clipboard_read(&mut self) -> Option<ClipboardRead> {
+    pub(crate) fn take_clipboard_read(&mut self) -> Option<ClipboardRead> {
         None
     }
-    pub fn complete_clipboard_read(&mut self, _request: ClipboardRead, _text: &CStr) {}
+    pub(crate) fn complete_clipboard_read(&mut self, _request: ClipboardRead, _text: &CStr) {}
     pub fn take_clipboard_write(&mut self) -> Option<ClipboardWrite> {
         None
     }
 }
 
-pub struct ClipboardRead {
+pub(crate) struct ClipboardRead {
     pub selection: bool,
     #[allow(dead_code)]
-    pub request: NonNull<c_void>,
+    request: NonNull<c_void>,
 }
 
 pub struct ClipboardWrite {
@@ -586,6 +589,10 @@ impl Modifiers {
 
     pub fn insert(&mut self, other: Self) {
         self.0 |= other.0;
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
     }
 
     const fn bits(self) -> i32 {

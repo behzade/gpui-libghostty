@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use gpui::{App, AppContext, Bounds, WindowBounds, WindowOptions, px, size};
-use gpui_neovim::{NvimEditor, NvimOptions};
+use gpui_neovim::NvimOptions;
+
+gpui_neovim::bind_gpui!(gpui);
 
 fn main() {
     let cwd = std::env::current_dir().expect("read current directory");

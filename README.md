@@ -48,11 +48,13 @@ Set `ZIG` to select a non-default Zig executable. Set `GPUI_NVIM` or assign
 
 ```toml
 [dependencies]
-gpui-libghostty = "0.2"
+gpui-libghostty = "0.3"
 ```
 
 ```rust,ignore
-use gpui_libghostty::{Terminal, TerminalOptions};
+use gpui_libghostty::TerminalOptions;
+
+gpui_libghostty::bind_gpui!(gpui);
 
 let terminal = Terminal::spawn(
     TerminalOptions::new("bash", project_directory),
@@ -92,7 +94,9 @@ options.clipboard_approval = Some(Arc::new(|request| {
 ## Neovim
 
 ```rust,ignore
-use gpui_neovim::{NvimEditor, NvimOptions};
+use gpui_neovim::NvimOptions;
+
+gpui_neovim::bind_gpui!(gpui);
 
 let editor = NvimEditor::spawn(
     NvimOptions::new(project_directory, initial_file),
@@ -122,11 +126,17 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 ```
 
-## Versioning
+## GPUI compatibility
 
-GPUI is pinned to Zed commit `cc053a4a6fa2fd0e8793201ed9099466af1be0b1`.
-Consumers using another GPUI source should patch that dependency consistently
-so entity and event types remain identical.
+Neither library depends on GPUI. `bind_gpui!` uses your application's GPUI crate
+or module path, including renamed packages such as `gpui-pre`.
+
+Replace the old `Terminal` / `NvimEditor` imports with the bindings shown above.
+Invoke the binding once at module scope, outside `fn main()`, and share the
+generated types across your app. The Neovim binding also defines `Terminal`.
+
+Checks cover the workspace's Zed revision and `gpui-pre` 0.3.4. GPUI API changes
+may require an adapter update; arbitrary revisions are not guaranteed.
 
 ## License
 
