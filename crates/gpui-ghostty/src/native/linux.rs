@@ -109,6 +109,8 @@ impl NativeSurface {
     /// # Safety
     /// The parent Wayland surface and display must outlive this surface.
     /// Create, use, and drop it on the window's UI thread.
+    // The parameters mirror the C entry point one for one.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn new(
         display: Option<NonNull<c_void>>,
         parent_surface: NonNull<c_void>,
@@ -117,6 +119,7 @@ impl NativeSurface {
         command: CString,
         load_user_config: bool,
         theme_config_path: Option<&CStr>,
+        quiet_login: bool,
     ) -> Result<Self, String> {
         let display = display.ok_or_else(|| "Wayland display handle is unavailable".to_owned())?;
         let wakeup = NativeWakeup::new();
@@ -135,6 +138,7 @@ impl NativeSurface {
                 command.as_ptr(),
                 load_user_config,
                 theme_config_path.map_or(std::ptr::null(), CStr::as_ptr),
+                quiet_login,
                 scale_factor,
                 wakeup.userdata(),
                 native_wakeup,
