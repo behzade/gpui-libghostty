@@ -73,6 +73,8 @@ pub struct TerminalOptions {
     pub working_directory: PathBuf,
     pub focus_on_spawn: bool,
     pub configuration: TerminalConfiguration,
+    /// Suppresses the login banner macOS prints before a surface's command runs.
+    pub quiet_login: bool,
     /// Approval policy for protected clipboard operations; absent means deny.
     pub clipboard_approval: Option<ClipboardApprovalCallback>,
 }
@@ -84,6 +86,7 @@ impl TerminalOptions {
             working_directory: working_directory.into(),
             focus_on_spawn: true,
             configuration: TerminalConfiguration::Default,
+            quiet_login: false,
             clipboard_approval: None,
         }
     }
@@ -153,6 +156,7 @@ pub unsafe fn spawn_surface(
         working_directory,
         focus_on_spawn: _,
         configuration,
+        quiet_login,
         clipboard_approval,
     } = options;
     let working_directory =
@@ -187,6 +191,7 @@ pub unsafe fn spawn_surface(
             command,
             load_user_config,
             theme_config_path.as_deref(),
+            quiet_login,
         )
     }
     .map_err(|error| format!("initialize libghostty: {error}"))?;

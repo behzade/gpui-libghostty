@@ -174,6 +174,7 @@ gpui_ghostty_surface *gpui_ghostty_surface_linux_new(
     const char *command,
     bool load_user_config,
     const char *theme_config_path,
+    bool quiet_login,
     double scale_factor,
     void *wakeup_userdata,
     gpui_ghostty_wakeup_cb wakeup,
@@ -233,11 +234,14 @@ gpui_ghostty_surface *gpui_ghostty_surface_linux_new(
         { .key = "TERM", .value = "xterm-256color" },
         { .key = "COLORTERM", .value = "truecolor" },
         { .key = "TERM_PROGRAM", .value = "gpui-ghostty" },
+        { .key = "GHOSTTY_QUIET_LOGIN", .value = "1" },
     };
+    size_t environment_count = sizeof(environment) / sizeof(environment[0]);
+    if (!quiet_login) environment_count -= 1;
     surface_config.working_directory = working_directory;
     surface_config.command = command;
     surface_config.env_vars = environment;
-    surface_config.env_var_count = sizeof(environment) / sizeof(environment[0]);
+    surface_config.env_var_count = environment_count;
     surface_config.wait_after_command = false;
     surface_config.context = GHOSTTY_SURFACE_CONTEXT_WINDOW;
     state->surface = ghostty_surface_new(state->app, &surface_config);

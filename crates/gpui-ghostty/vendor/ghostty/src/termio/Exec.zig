@@ -35,6 +35,10 @@ const log = std.log.scoped(.io_exec);
 /// The termios poll rate in milliseconds.
 const TERMIOS_POLL_MS = 200;
 
+/// Environment variable a surface sets to ask that its login(1) invocation
+/// be quiet, so the command's own output is the first thing on screen.
+const QUIET_LOGIN_ENV = "GHOSTTY_QUIET_LOGIN";
+
 /// If we build with flatpak support then we have to keep track of
 /// a potential execution on the host.
 const FlatpakHostCommand = if (!build_config.flatpak) struct {
@@ -825,11 +829,17 @@ const Subprocess = struct {
             );
         }
 
+        // Our marker for a quiet login is for this process only, so it
+        // doesn't leak to the command we're about to run.
+        const quiet_login = env.contains(QUIET_LOGIN_ENV);
+        _ = env.orderedRemove(QUIET_LOGIN_ENV);
+
         // Build our args list
         const args: []const [:0]const u8 = execCommand(
             alloc,
             shell_command,
             internal_os.passwd,
+            quiet_login,
         ) catch |err| switch (err) {
             // If we fail to allocate space for the command we want to
             // execute, we'd still like to try to run something so
@@ -1844,6 +1854,7 @@ fn execCommand(
     alloc: Allocator,
     command: configpkg.Command,
     comptime passwdpkg: type,
+    quiet_login: bool,
 ) (Allocator.Error || error{SystemError})![]const [:0]const u8 {
     // If we're on macOS, we have to use `login(1)` to get all of
     // the proper environment variables set and a login shell.
@@ -1893,9 +1904,11 @@ fn execCommand(
         // which we may not want. If we specify "-l" then we can avoid
         // this behavior but now the shell isn't a login shell.
         //
-        // login(1) prints its "Last login:" banner unless it is quiet,
-        // so we always pass "-q": a surface that runs a command should
-        // open on the command's own output, not on a login record.
+        // login(1) prints its "Last login:" banner unless it is quiet.
+        // A shell surface should look like any other macOS terminal, but
+        // a surface that runs a command wants the command's own output as
+        // the first thing on screen, so it asks for "-q" by setting
+        // QUIET_LOGIN_ENV.
         //
         // So to get all the behaviors we want, we specify "-l" but
         // execute "bash" (which is built-in to macOS). We then use
@@ -1913,7 +1926,7 @@ fn execCommand(
         //
         // Awesome.
         try args.append(alloc, "/usr/bin/login");
-        try args.append(alloc, "-q");
+        if (quiet_login) try args.append(alloc, "-q");
         try args.append(alloc, "-flp");
         try args.append(alloc, username);
 
@@ -2060,17 +2073,40 @@ test "execCommand darwin: shell command" {
                 .name = "testuser",
             };
         }
-    });
+    }, false);
+
+    try testing.expectEqual(8, result.len);
+    try testing.expectEqualStrings(result[0], "/usr/bin/login");
+    try testing.expectEqualStrings(result[1], "-flp");
+    try testing.expectEqualStrings(result[2], "testuser");
+    try testing.expectEqualStrings(result[3], "/bin/bash");
+    try testing.expectEqualStrings(result[4], "--noprofile");
+    try testing.expectEqualStrings(result[5], "--norc");
+    try testing.expectEqualStrings(result[6], "-c");
+    try testing.expectEqualStrings(result[7], "exec -l foo bar baz");
+}
+
+test "execCommand darwin: quiet login" {
+    if (comptime !builtin.os.tag.isDarwin()) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const result = try execCommand(alloc, .{ .shell = "foo bar baz" }, struct {
+        fn get(_: Allocator) !PasswdEntry {
+            return .{
+                .name = "testuser",
+            };
+        }
+    }, true);
 
     try testing.expectEqual(9, result.len);
     try testing.expectEqualStrings(result[0], "/usr/bin/login");
     try testing.expectEqualStrings(result[1], "-q");
     try testing.expectEqualStrings(result[2], "-flp");
     try testing.expectEqualStrings(result[3], "testuser");
-    try testing.expectEqualStrings(result[4], "/bin/bash");
-    try testing.expectEqualStrings(result[5], "--noprofile");
-    try testing.expectEqualStrings(result[6], "--norc");
-    try testing.expectEqualStrings(result[7], "-c");
     try testing.expectEqualStrings(result[8], "exec -l foo bar baz");
 }
 
@@ -2091,15 +2127,14 @@ test "execCommand darwin: direct command" {
                 .name = "testuser",
             };
         }
-    });
+    }, false);
 
-    try testing.expectEqual(6, result.len);
+    try testing.expectEqual(5, result.len);
     try testing.expectEqualStrings(result[0], "/usr/bin/login");
-    try testing.expectEqualStrings(result[1], "-q");
-    try testing.expectEqualStrings(result[2], "-flp");
-    try testing.expectEqualStrings(result[3], "testuser");
-    try testing.expectEqualStrings(result[4], "foo");
-    try testing.expectEqualStrings(result[5], "bar baz");
+    try testing.expectEqualStrings(result[1], "-flp");
+    try testing.expectEqualStrings(result[2], "testuser");
+    try testing.expectEqualStrings(result[3], "foo");
+    try testing.expectEqualStrings(result[4], "bar baz");
 }
 
 test "execCommand: shell command, empty passwd" {
@@ -2120,6 +2155,7 @@ test "execCommand: shell command, empty passwd" {
                 return .{};
             }
         },
+        false,
     );
 
     try testing.expectEqual(3, result.len);
@@ -2146,6 +2182,7 @@ test "execCommand: shell command, error passwd" {
                 return error.Fail;
             }
         },
+        false,
     );
 
     try testing.expectEqual(3, result.len);
@@ -2173,7 +2210,7 @@ test "execCommand: direct command, error passwd" {
             // login command and falls back to POSIX behavior.
             return error.Fail;
         }
-    });
+    }, false);
 
     try testing.expectEqual(2, result.len);
     try testing.expectEqualStrings(result[0], "foo");
@@ -2203,7 +2240,7 @@ test "execCommand: direct command, config freed" {
             // login command and falls back to POSIX behavior.
             return error.Fail;
         }
-    });
+    }, false);
 
     command_arena.deinit();
 
@@ -2224,7 +2261,7 @@ test "execCommand windows: bare cmd.exe resolves via COMSPEC" {
         fn get(_: Allocator) !PasswdEntry {
             return .{};
         }
-    });
+    }, false);
 
     try testing.expectEqual(1, result.len);
 
@@ -2246,7 +2283,7 @@ test "execCommand windows: bare non-cmd shell is passed through" {
         fn get(_: Allocator) !PasswdEntry {
             return .{};
         }
-    });
+    }, false);
 
     try testing.expectEqual(1, result.len);
     try testing.expectEqualStrings("pwsh.exe", result[0]);
@@ -2264,7 +2301,7 @@ test "execCommand windows: shell with args is split on whitespace" {
         fn get(_: Allocator) !PasswdEntry {
             return .{};
         }
-    });
+    }, false);
 
     try testing.expectEqual(2, result.len);
     try testing.expectEqualStrings("wsl", result[0]);
@@ -2286,7 +2323,7 @@ test "execCommand windows: direct command is passed through unchanged" {
         fn get(_: Allocator) !PasswdEntry {
             return .{};
         }
-    });
+    }, false);
 
     try testing.expectEqual(2, result.len);
     try testing.expectEqualStrings("C:\\tools\\foo.exe", result[0]);
