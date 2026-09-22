@@ -1846,8 +1846,7 @@ fn execCommand(
     comptime passwdpkg: type,
 ) (Allocator.Error || error{SystemError})![]const [:0]const u8 {
     // If we're on macOS, we have to use `login(1)` to get all of
-    // the proper environment variables set, a login shell, and proper
-    // hushlogin behavior.
+    // the proper environment variables set and a login shell.
     if (comptime builtin.target.os.tag.isDarwin()) darwin: {
         const passwd = passwdpkg.get(alloc) catch |err| {
             log.warn("failed to read passwd, not using a login shell err={}", .{err});
@@ -1858,19 +1857,6 @@ fn execCommand(
             log.warn("failed to get username, not using a login shell", .{});
             break :darwin;
         };
-
-        const hush = if (passwd.home) |home| hush: {
-            var dir = std.Io.Dir.openDirAbsolute(global.io(), home, .{}) catch |err| {
-                log.warn(
-                    "failed to open home dir, not checking for hushlogin err={}",
-                    .{err},
-                );
-                break :hush false;
-            };
-            defer dir.close(global.io());
-
-            break :hush if (dir.access(global.io(), ".hushlogin", .{})) true else |_| false;
-        } else false;
 
         // If we made it this far we're going to start building
         // the actual command.
@@ -1907,12 +1893,9 @@ fn execCommand(
         // which we may not want. If we specify "-l" then we can avoid
         // this behavior but now the shell isn't a login shell.
         //
-        // There is another issue: `login(1)` on macOS 14.3 and earlier
-        // checked for ".hushlogin" in the working directory. This means
-        // that if we specify "-l" then we won't get hushlogin honored
-        // if its in the home directory (which is standard). To get
-        // around this, we check for hushlogin ourselves and if present
-        // specify the "-q" flag to login(1).
+        // login(1) prints its "Last login:" banner unless it is quiet,
+        // so we always pass "-q": a surface that runs a command should
+        // open on the command's own output, not on a login record.
         //
         // So to get all the behaviors we want, we specify "-l" but
         // execute "bash" (which is built-in to macOS). We then use
@@ -1930,7 +1913,7 @@ fn execCommand(
         //
         // Awesome.
         try args.append(alloc, "/usr/bin/login");
-        if (hush) try args.append(alloc, "-q");
+        try args.append(alloc, "-q");
         try args.append(alloc, "-flp");
         try args.append(alloc, username);
 
@@ -2079,15 +2062,16 @@ test "execCommand darwin: shell command" {
         }
     });
 
-    try testing.expectEqual(8, result.len);
+    try testing.expectEqual(9, result.len);
     try testing.expectEqualStrings(result[0], "/usr/bin/login");
-    try testing.expectEqualStrings(result[1], "-flp");
-    try testing.expectEqualStrings(result[2], "testuser");
-    try testing.expectEqualStrings(result[3], "/bin/bash");
-    try testing.expectEqualStrings(result[4], "--noprofile");
-    try testing.expectEqualStrings(result[5], "--norc");
-    try testing.expectEqualStrings(result[6], "-c");
-    try testing.expectEqualStrings(result[7], "exec -l foo bar baz");
+    try testing.expectEqualStrings(result[1], "-q");
+    try testing.expectEqualStrings(result[2], "-flp");
+    try testing.expectEqualStrings(result[3], "testuser");
+    try testing.expectEqualStrings(result[4], "/bin/bash");
+    try testing.expectEqualStrings(result[5], "--noprofile");
+    try testing.expectEqualStrings(result[6], "--norc");
+    try testing.expectEqualStrings(result[7], "-c");
+    try testing.expectEqualStrings(result[8], "exec -l foo bar baz");
 }
 
 test "execCommand darwin: direct command" {
@@ -2109,12 +2093,13 @@ test "execCommand darwin: direct command" {
         }
     });
 
-    try testing.expectEqual(5, result.len);
+    try testing.expectEqual(6, result.len);
     try testing.expectEqualStrings(result[0], "/usr/bin/login");
-    try testing.expectEqualStrings(result[1], "-flp");
-    try testing.expectEqualStrings(result[2], "testuser");
-    try testing.expectEqualStrings(result[3], "foo");
-    try testing.expectEqualStrings(result[4], "bar baz");
+    try testing.expectEqualStrings(result[1], "-q");
+    try testing.expectEqualStrings(result[2], "-flp");
+    try testing.expectEqualStrings(result[3], "testuser");
+    try testing.expectEqualStrings(result[4], "foo");
+    try testing.expectEqualStrings(result[5], "bar baz");
 }
 
 test "execCommand: shell command, empty passwd" {
