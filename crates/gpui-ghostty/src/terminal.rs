@@ -3,7 +3,7 @@ use crate::clipboard::ClipboardApprovalCallback;
 use crate::native::{KeyAction, Modifiers, NativeSurface};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::{
-    ffi::{CString, c_void},
+    ffi::{CStr, CString, c_void},
     fmt,
     io::Write as _,
     path::PathBuf,
@@ -73,6 +73,8 @@ pub struct TerminalOptions {
     pub working_directory: PathBuf,
     pub focus_on_spawn: bool,
     pub configuration: TerminalConfiguration,
+    /// Suppresses the login banner macOS prints before a surface's command runs.
+    pub quiet_login: bool,
     /// Approval policy for protected clipboard operations; absent means deny.
     pub clipboard_approval: Option<ClipboardApprovalCallback>,
 }
@@ -84,6 +86,7 @@ impl TerminalOptions {
             working_directory: working_directory.into(),
             focus_on_spawn: true,
             configuration: TerminalConfiguration::Default,
+            quiet_login: false,
             clipboard_approval: None,
         }
     }
@@ -110,6 +113,50 @@ fn write_theme_config(theme: &TerminalTheme) -> Result<tempfile::NamedTempFile, 
     Ok(file)
 }
 
+/// Holds the temporary theme file a surface was configured from so a later
+/// update can rebuild the same configuration with new colors.
+pub struct TerminalThemeState {
+    load_user_config: bool,
+    file: Option<tempfile::NamedTempFile>,
+}
+
+impl TerminalThemeState {
+    /// Rebuilds the running surface's configuration with `theme`.
+    ///
+    /// Ghostty re-derives its render state during the call, so the temporary
+    /// theme file is only kept alive until the next update replaces it.
+    pub fn apply(
+        &mut self,
+        surface: &mut NativeSurface,
+        theme: &TerminalTheme,
+    ) -> Result<(), String> {
+        let load_user_config = self.load_user_config;
+        self.apply_with(theme, |path| {
+            surface.update_theme(load_user_config, Some(path))
+        })
+    }
+
+    /// Writes `theme` to a file and hands its path to `update`.
+    ///
+    /// The file outlives the call so `update` can read it, and is only replaced
+    /// once `update` has accepted the new colors. Split out from `apply` so that
+    /// file lifetime is testable without a platform window.
+    fn apply_with(
+        &mut self,
+        theme: &TerminalTheme,
+        update: impl FnOnce(&CStr) -> bool,
+    ) -> Result<(), String> {
+        let file = write_theme_config(theme)?;
+        let path = CString::new(file.path().to_string_lossy().as_bytes())
+            .map_err(|_| "temporary Ghostty theme path contains a NUL byte".to_owned())?;
+        if !update(path.as_c_str()) {
+            return Err("libghostty could not apply the terminal theme".to_owned());
+        }
+        self.file = Some(file);
+        Ok(())
+    }
+}
+
 /// Creates the native child used by the generated adapter.
 ///
 /// # Safety
@@ -119,12 +166,13 @@ pub unsafe fn spawn_surface(
     options: TerminalOptions,
     window: &(impl raw_window_handle::HasWindowHandle + raw_window_handle::HasDisplayHandle),
     scale_factor: f64,
-) -> Result<NativeSurface, String> {
+) -> Result<(NativeSurface, TerminalThemeState), String> {
     let TerminalOptions {
         command,
         working_directory,
         focus_on_spawn: _,
         configuration,
+        quiet_login,
         clipboard_approval,
     } = options;
     let working_directory =
@@ -159,11 +207,18 @@ pub unsafe fn spawn_surface(
             command,
             load_user_config,
             theme_config_path.as_deref(),
+            quiet_login,
         )
     }
     .map_err(|error| format!("initialize libghostty: {error}"))?;
     surface.wakeup().init_clipboard_approval(clipboard_approval);
-    Ok(surface)
+    Ok((
+        surface,
+        TerminalThemeState {
+            load_user_config,
+            file: theme_config,
+        },
+    ))
 }
 
 impl NativeSurface {
@@ -523,6 +578,103 @@ fn native_keycode(_: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn theme(background: TerminalColor, foreground: TerminalColor) -> TerminalTheme {
+        TerminalTheme::new(
+            background,
+            foreground,
+            std::array::from_fn(|index| TerminalColor::new(index as u8, 0, 0)),
+        )
+    }
+
+    fn theme_file_path(path: &CStr) -> PathBuf {
+        PathBuf::from(
+            std::str::from_utf8(path.to_bytes()).expect("temporary theme paths are UTF-8"),
+        )
+    }
+
+    /// A theme update hands the surface a file holding the new colors, and only
+    /// replaces the previous file once the surface has taken the new ones. A live
+    /// surface needs a platform window, so the file is read back from inside the
+    /// update instead.
+    #[test]
+    fn theme_updates_hand_the_surface_a_live_config_file() {
+        let dark = theme(
+            TerminalColor::new(0x11, 0x12, 0x13),
+            TerminalColor::new(0xee, 0xed, 0xec),
+        );
+        let light = theme(
+            TerminalColor::new(0xee, 0xed, 0xec),
+            TerminalColor::new(0x11, 0x12, 0x13),
+        );
+        let mut state = TerminalThemeState {
+            load_user_config: false,
+            file: None,
+        };
+
+        let first = std::cell::RefCell::new(None);
+        state
+            .apply_with(&dark, |path| {
+                let contents = std::fs::read_to_string(theme_file_path(path))
+                    .expect("the update can read the theme");
+                assert!(contents.contains("background = #111213\n"));
+                assert!(contents.contains("foreground = #eeedec\n"));
+                *first.borrow_mut() = Some(theme_file_path(path));
+                true
+            })
+            .expect("apply the first theme");
+        let first = first.into_inner().expect("the update saw a path");
+        assert!(
+            first.exists(),
+            "the applied theme file stays until replaced"
+        );
+
+        let second = std::cell::RefCell::new(None);
+        state
+            .apply_with(&light, |path| {
+                let contents = std::fs::read_to_string(theme_file_path(path))
+                    .expect("the update can read the theme");
+                assert!(contents.contains("background = #eeedec\n"));
+                *second.borrow_mut() = Some(theme_file_path(path));
+                true
+            })
+            .expect("apply the second theme");
+        let second = second.into_inner().expect("the update saw a path");
+        assert_ne!(first, second);
+        assert!(!first.exists(), "the replaced theme file is removed");
+        assert!(second.exists());
+    }
+
+    /// A surface that refuses a theme leaves the colors it is already running with
+    /// in place, so a later update can still be applied.
+    #[test]
+    fn a_refused_theme_update_keeps_the_running_theme() {
+        let mut state = TerminalThemeState {
+            load_user_config: true,
+            file: None,
+        };
+
+        let error = state
+            .apply_with(
+                &theme(
+                    TerminalColor::new(0, 0, 0),
+                    TerminalColor::new(0xff, 0xff, 0xff),
+                ),
+                |_| false,
+            )
+            .expect_err("a refused update reports the failure");
+
+        assert_eq!(error, "libghostty could not apply the terminal theme");
+        assert!(state.file.is_none());
+    }
+
+    /// A quiet login is opt-in per surface, so a terminal that does not ask for it
+    /// keeps the login banner its platform prints by default.
+    #[test]
+    fn quiet_login_is_off_until_a_surface_asks_for_it() {
+        let options = TerminalOptions::new("echo hi", std::path::PathBuf::from("."));
+        assert!(!options.quiet_login);
+    }
 
     #[test]
     fn physical_mapping_covers_neovim_and_missing_gpui_keys() {

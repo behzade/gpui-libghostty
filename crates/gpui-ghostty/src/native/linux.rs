@@ -24,6 +24,7 @@ unsafe extern "C" {
         command: *const c_char,
         load_user_config: bool,
         theme_config_path: *const c_char,
+        quiet_login: bool,
         scale_factor: f64,
         wakeup_userdata: *mut c_void,
         wakeup: unsafe extern "C" fn(*mut c_void),
@@ -32,6 +33,12 @@ unsafe extern "C" {
     fn gpui_ghostty_surface_linux_free(surface: *mut RawSurface);
     fn gpui_ghostty_surface_linux_tick(surface: *mut RawSurface);
     fn gpui_ghostty_surface_linux_is_alive(surface: *const RawSurface) -> bool;
+    fn gpui_ghostty_surface_linux_frame_count(surface: *mut RawSurface) -> u64;
+    fn gpui_ghostty_surface_linux_update_theme(
+        surface: *mut RawSurface,
+        load_user_config: bool,
+        theme_config_path: *const c_char,
+    ) -> bool;
     fn gpui_ghostty_surface_linux_snapshot(
         surface: *mut RawSurface,
         pixels: *mut *mut u8,
@@ -61,6 +68,7 @@ unsafe extern "C" {
         scale_factor: f64,
     );
     fn gpui_ghostty_surface_linux_set_visible(surface: *mut RawSurface, visible: bool);
+    fn gpui_ghostty_surface_linux_set_hidden_rendering(surface: *mut RawSurface, rendered: bool);
     fn gpui_ghostty_surface_linux_set_focus(surface: *mut RawSurface, focused: bool);
     fn gpui_ghostty_surface_linux_key(
         surface: *mut RawSurface,
@@ -109,6 +117,8 @@ impl NativeSurface {
     /// # Safety
     /// The parent Wayland surface and display must outlive this surface.
     /// Create, use, and drop it on the window's UI thread.
+    // The parameters mirror the C entry point one for one.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn new(
         display: Option<NonNull<c_void>>,
         parent_surface: NonNull<c_void>,
@@ -117,6 +127,7 @@ impl NativeSurface {
         command: CString,
         load_user_config: bool,
         theme_config_path: Option<&CStr>,
+        quiet_login: bool,
     ) -> Result<Self, String> {
         let display = display.ok_or_else(|| "Wayland display handle is unavailable".to_owned())?;
         let wakeup = NativeWakeup::new();
@@ -135,6 +146,7 @@ impl NativeSurface {
                 command.as_ptr(),
                 load_user_config,
                 theme_config_path.map_or(std::ptr::null(), CStr::as_ptr),
+                quiet_login,
                 scale_factor,
                 wakeup.userdata(),
                 native_wakeup,
@@ -165,6 +177,34 @@ impl NativeSurface {
 
     pub fn is_alive(&self) -> bool {
         unsafe { gpui_ghostty_surface_linux_is_alive(self.raw.as_ptr()) }
+    }
+
+    /// Number of frames Ghostty has drawn for this surface. It advances once per
+    /// rendered frame, so a caller can wait for a configuration change to reach
+    /// the screen without guessing a delay.
+    pub fn frame_count(&self) -> u64 {
+        // SAFETY: `raw` is valid for the lifetime of the surface.
+        unsafe { gpui_ghostty_surface_linux_frame_count(self.raw.as_ptr()) }
+    }
+
+    /// Rebuilds the running surface's configuration from the given sources.
+    ///
+    /// Ghostty derives everything it needs before returning, so the theme file
+    /// may be removed once this call completes.
+    pub(crate) fn update_theme(
+        &mut self,
+        load_user_config: bool,
+        theme_config_path: Option<&CStr>,
+    ) -> bool {
+        // SAFETY: `raw` is uniquely owned, the optional path outlives the call, and
+        // the shim copies the derived configuration before it returns.
+        unsafe {
+            gpui_ghostty_surface_linux_update_theme(
+                self.raw.as_ptr(),
+                load_user_config,
+                theme_config_path.map_or(std::ptr::null(), CStr::as_ptr),
+            )
+        }
     }
 
     pub(crate) fn snapshot(&mut self) -> Result<NativeSnapshot, String> {
@@ -229,6 +269,13 @@ impl NativeSurface {
 
     pub fn set_focus(&mut self, focused: bool) {
         unsafe { gpui_ghostty_surface_linux_set_focus(self.raw.as_ptr(), focused) }
+    }
+
+    /// Keeps the renderer running while the surface's view is hidden, so a caller
+    /// that presents a captured frame can read a current one back.
+    pub fn set_hidden_rendering(&mut self, rendered: bool) {
+        // SAFETY: `raw` is uniquely owned and the value crosses the ABI by value.
+        unsafe { gpui_ghostty_surface_linux_set_hidden_rendering(self.raw.as_ptr(), rendered) }
     }
 
     pub fn key(
@@ -346,5 +393,53 @@ unsafe extern "C" fn clear_current(userdata: *mut c_void) {
 unsafe extern "C" fn swap_buffers(userdata: *mut c_void) {
     if !userdata.is_null() {
         unsafe { &*(userdata.cast::<WaylandGlSurface>()) }.swap_buffers();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shim defines this constructor with these parameters in this order,
+    /// including the quiet-login flag between the theme path and the scale
+    /// factor. Binding the declared type here fails the build when the two drift
+    /// apart, instead of passing a mismatched argument list across the C
+    /// boundary.
+    #[test]
+    fn surface_constructor_type_matches_the_shim() {
+        let _: unsafe extern "C" fn(
+            *mut c_void,
+            unsafe extern "C" fn(*mut c_void) -> bool,
+            unsafe extern "C" fn(*mut c_void),
+            unsafe extern "C" fn(*mut c_void),
+            *const c_char,
+            *const c_char,
+            bool,
+            *const c_char,
+            bool,
+            f64,
+            *mut c_void,
+            unsafe extern "C" fn(*mut c_void),
+            unsafe extern "C" fn(*mut c_void, i32, *const c_char) -> bool,
+        ) -> *mut RawSurface = gpui_ghostty_surface_linux_new;
+    }
+
+    /// Waiting for a themed frame means reading the frame counter and asking
+    /// this surface for a theme update. Both entry points must exist for this
+    /// platform, and both report "nothing happened" without a surface.
+    #[test]
+    fn frame_counting_and_theme_updates_guard_a_missing_surface() {
+        let null = std::ptr::null_mut();
+        // SAFETY: A null surface is documented as a no-op for these calls, which
+        // is what this test asserts.
+        unsafe {
+            assert_eq!(gpui_ghostty_surface_linux_frame_count(null), 0);
+            assert!(!gpui_ghostty_surface_linux_update_theme(
+                null,
+                false,
+                std::ptr::null()
+            ));
+            gpui_ghostty_surface_linux_set_hidden_rendering(null, true);
+        }
     }
 }

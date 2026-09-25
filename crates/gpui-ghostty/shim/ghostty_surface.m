@@ -1,19 +1,17 @@
 #import <AppKit/AppKit.h>
 #import <CoreVideo/CoreVideo.h>
 #import <IOSurface/IOSurface.h>
+#import <objc/runtime.h>
 #import <stdatomic.h>
 #import <stdlib.h>
 #import <string.h>
 #import <ghostty.h>
 
-@interface GpuiGhosttyView : NSView
-@end
+// Forward declaration so the presented frames of a surface can be reported back
+// to it.
+typedef struct gpui_ghostty_surface gpui_ghostty_surface;
 
-@implementation GpuiGhosttyView
-- (NSView *)hitTest:(NSPoint)point {
-    (void)point;
-    return nil;
-}
+@interface GpuiGhosttyView : NSView
 @end
 
 typedef void (*gpui_ghostty_wakeup_cb)(void *userdata);
@@ -29,8 +27,80 @@ typedef struct gpui_ghostty_surface {
     void *wakeup_userdata;
     gpui_ghostty_wakeup_cb wakeup;
     gpui_ghostty_approve_clipboard_cb approve_clipboard;
+    bool visible;
+    bool hidden_rendering;
     _Atomic bool alive;
+    _Atomic uint64_t frame_count;
 } gpui_ghostty_surface;
+
+@implementation GpuiGhosttyView
+- (NSView *)hitTest:(NSPoint)point {
+    (void)point;
+    return nil;
+}
+@end
+
+// Associates the surface a layer reports its frames to.
+static void *const gpui_ghostty_frame_state_key = (void *)&gpui_ghostty_frame_state_key;
+
+// Ghostty's Metal renderer presents a frame by handing the finished surface to
+// the layer it installed on this view, and it does so without asking the
+// embedder to draw: `GHOSTTY_ACTION_RENDER` only covers surfaces Ghostty asks us
+// to draw, so counting there misses every frame the renderer produces on its own.
+//
+// The renderer can present the same surface twice in a row, so the count comes
+// from the assignment itself rather than from watching the value change:
+// `gpui_ghostty_presented_frame` becomes the layer class's own `setContents:`
+// and forwards to the implementation Ghostty would have used.
+static IMP gpui_ghostty_contents_forward = NULL;
+static bool gpui_ghostty_contents_hooked = false;
+
+typedef void (*gpui_ghostty_set_contents_f)(id, SEL, id);
+
+static void gpui_ghostty_presented_frame(id layer, SEL selector, id contents) {
+    gpui_ghostty_surface *state =
+        (gpui_ghostty_surface *)objc_getAssociatedObject(layer, gpui_ghostty_frame_state_key);
+    if (state != NULL) {
+        atomic_fetch_add_explicit(&state->frame_count, 1, memory_order_release);
+    }
+    ((gpui_ghostty_set_contents_f)gpui_ghostty_contents_forward)(layer, selector, contents);
+}
+
+// Starts counting the frames Ghostty presents to this surface.
+//
+// The renderer creates its layer after the surface exists, so this runs both when
+// the surface is created and whenever a caller asks for a count. Presenting a
+// frame requires that layer, so no frame can be missed once a caller starts
+// watching.
+static void gpui_ghostty_count_frames(gpui_ghostty_surface *state) {
+    if (state == NULL || state->view == nil) return;
+    id layer = state->view.layer;
+    if (layer == nil) return;
+    objc_setAssociatedObject(layer, gpui_ghostty_frame_state_key, (id)state, OBJC_ASSOCIATION_ASSIGN);
+    if (gpui_ghostty_contents_hooked) return;
+    Class class = object_getClass(layer);
+    if (class == Nil) return;
+    Method inherited = class_getInstanceMethod(class, @selector(setContents:));
+    IMP original = inherited == NULL ? NULL : method_getImplementation(inherited);
+    if (!class_addMethod(class, @selector(setContents:), (IMP)gpui_ghostty_presented_frame, "v@:@")) {
+        // The class defines its own setter, so interpose on that definition.
+        Method defined = class_getInstanceMethod(class, @selector(setContents:));
+        if (defined == NULL) return;
+        original = method_getImplementation(defined);
+        method_setImplementation(defined, (IMP)gpui_ghostty_presented_frame);
+    }
+    gpui_ghostty_contents_forward = original;
+    gpui_ghostty_contents_hooked = true;
+}
+
+// Stops counting frames for a surface that is going away, so a frame the renderer
+// may still present cannot reach freed memory.
+static void gpui_ghostty_forget_frames(gpui_ghostty_surface *state) {
+    if (state == NULL || state->view == nil) return;
+    id layer = state->view.layer;
+    if (layer == nil) return;
+    objc_setAssociatedObject(layer, gpui_ghostty_frame_state_key, nil, OBJC_ASSOCIATION_ASSIGN);
+}
 
 static void runtime_wakeup(void *userdata) {
     gpui_ghostty_surface *state = userdata;
@@ -110,6 +180,7 @@ gpui_ghostty_surface *gpui_ghostty_surface_new(
     const char *command,
     bool load_user_config,
     const char *theme_config_path,
+    bool quiet_login,
     void *wakeup_userdata,
     gpui_ghostty_wakeup_cb wakeup,
     gpui_ghostty_approve_clipboard_cb approve_clipboard
@@ -167,15 +238,22 @@ gpui_ghostty_surface *gpui_ghostty_surface_new(
         { .key = "TERM", .value = "xterm-256color" },
         { .key = "COLORTERM", .value = "truecolor" },
         { .key = "TERM_PROGRAM", .value = "gpui-ghostty" },
+        { .key = "GHOSTTY_QUIET_LOGIN", .value = "1" },
     };
+    size_t environment_count = sizeof(environment) / sizeof(environment[0]);
+    if (!quiet_login) environment_count -= 1;
     surface_config.working_directory = working_directory;
     surface_config.command = command;
     surface_config.env_vars = environment;
-    surface_config.env_var_count = sizeof(environment) / sizeof(environment[0]);
+    surface_config.env_var_count = environment_count;
     surface_config.wait_after_command = false;
     surface_config.context = GHOSTTY_SURFACE_CONTEXT_WINDOW;
     state->surface = ghostty_surface_new(state->app, &surface_config);
     if (state->surface == NULL) goto fail;
+
+    // Count presented frames from here on. The renderer may not have installed the
+    // layer it draws into yet, so asking for a count is what finishes this off.
+    gpui_ghostty_count_frames(state);
 
     ghostty_app_set_focus(state->app, false);
     ghostty_surface_set_focus(state->surface, false);
@@ -193,6 +271,9 @@ fail:
 
 void gpui_ghostty_surface_free(gpui_ghostty_surface *state) {
     if (state == NULL) return;
+    // Stop counting before the view goes away, so a later frame can't reach a
+    // surface that has been freed.
+    gpui_ghostty_forget_frames(state);
     [state->view removeFromSuperview];
     if (state->surface != NULL) ghostty_surface_free(state->surface);
     if (state->app != NULL) ghostty_app_free(state->app);
@@ -209,6 +290,40 @@ void gpui_ghostty_surface_tick(gpui_ghostty_surface *state) {
 bool gpui_ghostty_surface_is_alive(const gpui_ghostty_surface *state) {
     return state != NULL && atomic_load_explicit(&state->alive, memory_order_acquire)
         && !ghostty_surface_process_exited(state->surface);
+}
+
+// Counts the frames Ghostty has handed to this surface. A caller that applies a
+// new configuration can wait for the count to move instead of guessing a delay.
+uint64_t gpui_ghostty_surface_frame_count(gpui_ghostty_surface *state) {
+    if (state == NULL) return 0;
+    // The renderer installs its layer shortly after the surface is created, so
+    // this is also the moment to attach to it.
+    gpui_ghostty_count_frames(state);
+    return atomic_load_explicit(&state->frame_count, memory_order_acquire);
+}
+
+bool gpui_ghostty_surface_update_theme(
+    gpui_ghostty_surface *state,
+    bool load_user_config,
+    const char *theme_config_path
+) {
+    if (state == NULL || state->surface == NULL) return false;
+    ghostty_config_t config = ghostty_config_new();
+    if (config == NULL) return false;
+    if (load_user_config) {
+        ghostty_config_load_default_files(config);
+        ghostty_config_load_recursive_files(config);
+    }
+    if (theme_config_path != NULL) {
+        ghostty_config_load_file(config, theme_config_path);
+    }
+    ghostty_config_finalize(config);
+    ghostty_surface_update_config(state->surface, config);
+    ghostty_config_free(config);
+    // Render the derived configuration now instead of waiting for the next
+    // wakeup, so the new colors reach the layer as soon as possible.
+    ghostty_surface_refresh(state->surface);
+    return true;
 }
 
 bool gpui_ghostty_surface_snapshot(
@@ -284,9 +399,22 @@ void gpui_ghostty_surface_set_frame(
 
 void gpui_ghostty_surface_set_visible(gpui_ghostty_surface *state, bool visible) {
     if (state == NULL || state->surface == NULL) return;
+    state->visible = visible;
     [state->view setHidden:!visible];
-    ghostty_surface_set_occlusion(state->surface, visible);
+    ghostty_surface_set_occlusion(state->surface, visible || state->hidden_rendering);
     if (visible) ghostty_surface_refresh(state->surface);
+}
+
+// Keeps a hidden surface rendering so a caller that draws a captured frame can
+// read the current one back. Cleared when the surface is visible again.
+void gpui_ghostty_surface_set_hidden_rendering(
+    gpui_ghostty_surface *state,
+    bool rendered
+) {
+    if (state == NULL || state->surface == NULL) return;
+    if (state->hidden_rendering == rendered) return;
+    state->hidden_rendering = rendered;
+    if (!state->visible) ghostty_surface_set_occlusion(state->surface, rendered);
 }
 
 void gpui_ghostty_surface_set_focus(gpui_ghostty_surface *state, bool focused) {

@@ -24,6 +24,7 @@ macro_rules! bind_gpui {
             /// A GPUI entity backed by Ghostty's native Metal or Wayland/OpenGL surface.
             pub struct Terminal {
                 surface: NativeSurface,
+                theme: $crate::__private::TerminalThemeState,
                 focus: FocusHandle,
                 bounds: Bounds<Pixels>,
                 tick_task: Option<Task<()>>,
@@ -42,7 +43,7 @@ macro_rules! bind_gpui {
                     let focus_on_spawn = options.focus_on_spawn;
                     // SAFETY: GPUI owns the parent window; this entity services and drops
                     // its native child on the window's UI thread, as in the native adapter.
-                    let surface = unsafe {
+                    let (surface, theme) = unsafe {
                         $crate::__private::spawn_surface(
                             options,
                             window,
@@ -68,6 +69,7 @@ macro_rules! bind_gpui {
                         ];
                         let mut terminal = Self {
                             surface,
+                            theme,
                             focus,
                             bounds: Bounds::default(),
                             tick_task: None,
@@ -82,6 +84,28 @@ macro_rules! bind_gpui {
 
                 pub fn is_alive(&self) -> bool {
                     self.surface.is_alive()
+                }
+
+                /// Applies new colors to the running terminal without restarting its process.
+                ///
+                /// Ghostty re-derives its render state during the call, so the temporary
+                /// theme file is only kept alive until the next update replaces it.
+                pub fn update_theme(&mut self, theme: $crate::TerminalTheme) -> Result<(), String> {
+                    self.theme.apply(&mut self.surface, &theme)
+                }
+
+                /// Number of frames Ghostty has drawn for this terminal. It advances once
+                /// per rendered frame, so a caller that applies a theme can wait for the
+                /// new colors to reach the screen instead of guessing a delay.
+                pub fn frame_count(&mut self) -> u64 {
+                    self.surface.frame_count()
+                }
+
+                /// Keeps the renderer running while this surface is hidden, so a caller
+                /// that presents a captured frame can read a current one back after a
+                /// configuration change.
+                pub fn set_hidden_rendering(&mut self, rendered: bool) {
+                    self.surface.set_hidden_rendering(rendered);
                 }
 
                 pub fn focus<T>(&mut self, window: &mut Window, cx: &mut Context<T>) {

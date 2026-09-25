@@ -32,7 +32,10 @@ typedef struct gpui_ghostty_surface {
     ghostty_clipboard_e clipboard_write_location;
     uint32_t width;
     uint32_t height;
+    bool visible;
+    bool hidden_rendering;
     _Atomic bool alive;
+    _Atomic uint64_t frame_count;
 } gpui_ghostty_surface;
 
 static pthread_once_t ghostty_once = PTHREAD_ONCE_INIT;
@@ -100,6 +103,7 @@ static bool runtime_action(ghostty_app_t app, ghostty_target_s target, ghostty_a
 
     gpui_ghostty_surface *state = ghostty_surface_userdata(target.target.surface);
     if (state == NULL || !state->make_current(state->platform_userdata)) return false;
+    atomic_fetch_add_explicit(&state->frame_count, 1, memory_order_release);
     ghostty_surface_draw(target.target.surface);
     state->swap_buffers(state->platform_userdata);
     state->clear_current(state->platform_userdata);
@@ -170,6 +174,7 @@ gpui_ghostty_surface *gpui_ghostty_surface_linux_new(
     const char *command,
     bool load_user_config,
     const char *theme_config_path,
+    bool quiet_login,
     double scale_factor,
     void *wakeup_userdata,
     gpui_ghostty_wakeup_cb wakeup,
@@ -229,11 +234,14 @@ gpui_ghostty_surface *gpui_ghostty_surface_linux_new(
         { .key = "TERM", .value = "xterm-256color" },
         { .key = "COLORTERM", .value = "truecolor" },
         { .key = "TERM_PROGRAM", .value = "gpui-ghostty" },
+        { .key = "GHOSTTY_QUIET_LOGIN", .value = "1" },
     };
+    size_t environment_count = sizeof(environment) / sizeof(environment[0]);
+    if (!quiet_login) environment_count -= 1;
     surface_config.working_directory = working_directory;
     surface_config.command = command;
     surface_config.env_vars = environment;
-    surface_config.env_var_count = sizeof(environment) / sizeof(environment[0]);
+    surface_config.env_var_count = environment_count;
     surface_config.wait_after_command = false;
     surface_config.context = GHOSTTY_SURFACE_CONTEXT_WINDOW;
     state->surface = ghostty_surface_new(state->app, &surface_config);
@@ -272,6 +280,37 @@ void gpui_ghostty_surface_linux_tick(gpui_ghostty_surface *state) {
 bool gpui_ghostty_surface_linux_is_alive(const gpui_ghostty_surface *state) {
     return state != NULL && atomic_load_explicit(&state->alive, memory_order_acquire) &&
         !ghostty_surface_process_exited(state->surface);
+}
+
+// Counts the frames Ghostty has handed to this surface. A caller that applies a
+// new configuration can wait for the count to move instead of guessing a delay.
+uint64_t gpui_ghostty_surface_linux_frame_count(gpui_ghostty_surface *state) {
+    if (state == NULL) return 0;
+    return atomic_load_explicit(&state->frame_count, memory_order_acquire);
+}
+
+bool gpui_ghostty_surface_linux_update_theme(
+    gpui_ghostty_surface *state,
+    bool load_user_config,
+    const char *theme_config_path
+) {
+    if (state == NULL || state->surface == NULL) return false;
+    ghostty_config_t config = ghostty_config_new();
+    if (config == NULL) return false;
+    if (load_user_config) {
+        ghostty_config_load_default_files(config);
+        ghostty_config_load_recursive_files(config);
+    }
+    if (theme_config_path != NULL) {
+        ghostty_config_load_file(config, theme_config_path);
+    }
+    ghostty_config_finalize(config);
+    ghostty_surface_update_config(state->surface, config);
+    ghostty_config_free(config);
+    // Render the derived configuration now instead of waiting for the next
+    // wakeup, so the new colors reach the surface as soon as possible.
+    ghostty_surface_refresh(state->surface);
+    return true;
 }
 
 bool gpui_ghostty_surface_linux_snapshot(
@@ -396,8 +435,21 @@ void gpui_ghostty_surface_linux_set_size(
 
 void gpui_ghostty_surface_linux_set_visible(gpui_ghostty_surface *state, bool visible) {
     if (state == NULL || state->surface == NULL) return;
-    ghostty_surface_set_occlusion(state->surface, visible);
+    state->visible = visible;
+    ghostty_surface_set_occlusion(state->surface, visible || state->hidden_rendering);
     if (visible) ghostty_surface_refresh(state->surface);
+}
+
+// Keeps a hidden surface rendering so a caller that draws a captured frame can
+// read the current one back. Cleared when the surface is visible again.
+void gpui_ghostty_surface_linux_set_hidden_rendering(
+    gpui_ghostty_surface *state,
+    bool rendered
+) {
+    if (state == NULL || state->surface == NULL) return;
+    if (state->hidden_rendering == rendered) return;
+    state->hidden_rendering = rendered;
+    if (!state->visible) ghostty_surface_set_occlusion(state->surface, rendered);
 }
 
 void gpui_ghostty_surface_linux_set_focus(gpui_ghostty_surface *state, bool focused) {
