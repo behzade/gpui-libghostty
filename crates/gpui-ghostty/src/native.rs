@@ -528,6 +528,50 @@ mod platform {
             unsafe { gpui_ghostty_surface_free(self.raw.as_ptr()) }
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The shim defines this constructor with these parameters in this order,
+        /// including the quiet-login flag between the theme path and the wakeup
+        /// data. Binding the declared type here fails the build when the two
+        /// drift apart, instead of passing a mismatched argument list across the
+        /// C boundary.
+        #[test]
+        fn surface_constructor_type_matches_the_shim() {
+            let _: unsafe extern "C" fn(
+                *mut c_void,
+                *const c_char,
+                *const c_char,
+                bool,
+                *const c_char,
+                bool,
+                *mut c_void,
+                unsafe extern "C" fn(*mut c_void),
+                unsafe extern "C" fn(*mut c_void, i32, *const c_char) -> bool,
+            ) -> *mut RawSurface = gpui_ghostty_surface_new;
+        }
+
+        /// Waiting for a themed frame means reading the frame counter and asking
+        /// this surface for a theme update. Both entry points must exist for this
+        /// platform, and both report "nothing happened" without a surface.
+        #[test]
+        fn frame_counting_and_theme_updates_guard_a_missing_surface() {
+            let null = std::ptr::null_mut();
+            // SAFETY: A null surface is documented as a no-op for these calls,
+            // which is what this test asserts.
+            unsafe {
+                assert_eq!(gpui_ghostty_surface_frame_count(null), 0);
+                assert!(!gpui_ghostty_surface_update_theme(
+                    null,
+                    false,
+                    std::ptr::null()
+                ));
+                gpui_ghostty_surface_set_hidden_rendering(null, true);
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -555,6 +599,7 @@ impl NativeSurface {
         _command: CString,
         _load_user_config: bool,
         _theme_config_path: Option<&CStr>,
+        _quiet_login: bool,
     ) -> Result<Self, &'static str> {
         Err("libghostty native surfaces require macOS or Wayland")
     }

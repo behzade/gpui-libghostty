@@ -1,19 +1,17 @@
 #import <AppKit/AppKit.h>
 #import <CoreVideo/CoreVideo.h>
 #import <IOSurface/IOSurface.h>
+#import <objc/runtime.h>
 #import <stdatomic.h>
 #import <stdlib.h>
 #import <string.h>
 #import <ghostty.h>
 
-@interface GpuiGhosttyView : NSView
-@end
+// Forward declaration so the presented frames of a surface can be reported back
+// to it.
+typedef struct gpui_ghostty_surface gpui_ghostty_surface;
 
-@implementation GpuiGhosttyView
-- (NSView *)hitTest:(NSPoint)point {
-    (void)point;
-    return nil;
-}
+@interface GpuiGhosttyView : NSView
 @end
 
 typedef void (*gpui_ghostty_wakeup_cb)(void *userdata);
@@ -35,6 +33,75 @@ typedef struct gpui_ghostty_surface {
     _Atomic uint64_t frame_count;
 } gpui_ghostty_surface;
 
+@implementation GpuiGhosttyView
+- (NSView *)hitTest:(NSPoint)point {
+    (void)point;
+    return nil;
+}
+@end
+
+// Associates the surface a layer reports its frames to.
+static void *const gpui_ghostty_frame_state_key = (void *)&gpui_ghostty_frame_state_key;
+
+// Ghostty's Metal renderer presents a frame by handing the finished surface to
+// the layer it installed on this view, and it does so without asking the
+// embedder to draw: `GHOSTTY_ACTION_RENDER` only covers surfaces Ghostty asks us
+// to draw, so counting there misses every frame the renderer produces on its own.
+//
+// The renderer can present the same surface twice in a row, so the count comes
+// from the assignment itself rather than from watching the value change:
+// `gpui_ghostty_presented_frame` becomes the layer class's own `setContents:`
+// and forwards to the implementation Ghostty would have used.
+static IMP gpui_ghostty_contents_forward = NULL;
+static bool gpui_ghostty_contents_hooked = false;
+
+typedef void (*gpui_ghostty_set_contents_f)(id, SEL, id);
+
+static void gpui_ghostty_presented_frame(id layer, SEL selector, id contents) {
+    gpui_ghostty_surface *state =
+        (gpui_ghostty_surface *)objc_getAssociatedObject(layer, gpui_ghostty_frame_state_key);
+    if (state != NULL) {
+        atomic_fetch_add_explicit(&state->frame_count, 1, memory_order_release);
+    }
+    ((gpui_ghostty_set_contents_f)gpui_ghostty_contents_forward)(layer, selector, contents);
+}
+
+// Starts counting the frames Ghostty presents to this surface.
+//
+// The renderer creates its layer after the surface exists, so this runs both when
+// the surface is created and whenever a caller asks for a count. Presenting a
+// frame requires that layer, so no frame can be missed once a caller starts
+// watching.
+static void gpui_ghostty_count_frames(gpui_ghostty_surface *state) {
+    if (state == NULL || state->view == nil) return;
+    id layer = state->view.layer;
+    if (layer == nil) return;
+    objc_setAssociatedObject(layer, gpui_ghostty_frame_state_key, (id)state, OBJC_ASSOCIATION_ASSIGN);
+    if (gpui_ghostty_contents_hooked) return;
+    Class class = object_getClass(layer);
+    if (class == Nil) return;
+    Method inherited = class_getInstanceMethod(class, @selector(setContents:));
+    IMP original = inherited == NULL ? NULL : method_getImplementation(inherited);
+    if (!class_addMethod(class, @selector(setContents:), (IMP)gpui_ghostty_presented_frame, "v@:@")) {
+        // The class defines its own setter, so interpose on that definition.
+        Method defined = class_getInstanceMethod(class, @selector(setContents:));
+        if (defined == NULL) return;
+        original = method_getImplementation(defined);
+        method_setImplementation(defined, (IMP)gpui_ghostty_presented_frame);
+    }
+    gpui_ghostty_contents_forward = original;
+    gpui_ghostty_contents_hooked = true;
+}
+
+// Stops counting frames for a surface that is going away, so a frame the renderer
+// may still present cannot reach freed memory.
+static void gpui_ghostty_forget_frames(gpui_ghostty_surface *state) {
+    if (state == NULL || state->view == nil) return;
+    id layer = state->view.layer;
+    if (layer == nil) return;
+    objc_setAssociatedObject(layer, gpui_ghostty_frame_state_key, nil, OBJC_ASSOCIATION_ASSIGN);
+}
+
 static void runtime_wakeup(void *userdata) {
     gpui_ghostty_surface *state = userdata;
     state->wakeup(state->wakeup_userdata);
@@ -45,10 +112,6 @@ static bool runtime_action(ghostty_app_t app, ghostty_target_s target, ghostty_a
     if (action.tag == GHOSTTY_ACTION_RENDER &&
         target.tag == GHOSTTY_TARGET_SURFACE &&
         target.target.surface != NULL) {
-        gpui_ghostty_surface *state = ghostty_surface_userdata(target.target.surface);
-        if (state != NULL) {
-            atomic_fetch_add_explicit(&state->frame_count, 1, memory_order_release);
-        }
         ghostty_surface_draw(target.target.surface);
         return true;
     }
@@ -188,6 +251,10 @@ gpui_ghostty_surface *gpui_ghostty_surface_new(
     state->surface = ghostty_surface_new(state->app, &surface_config);
     if (state->surface == NULL) goto fail;
 
+    // Count presented frames from here on. The renderer may not have installed the
+    // layer it draws into yet, so asking for a count is what finishes this off.
+    gpui_ghostty_count_frames(state);
+
     ghostty_app_set_focus(state->app, false);
     ghostty_surface_set_focus(state->surface, false);
     return state;
@@ -204,6 +271,9 @@ fail:
 
 void gpui_ghostty_surface_free(gpui_ghostty_surface *state) {
     if (state == NULL) return;
+    // Stop counting before the view goes away, so a later frame can't reach a
+    // surface that has been freed.
+    gpui_ghostty_forget_frames(state);
     [state->view removeFromSuperview];
     if (state->surface != NULL) ghostty_surface_free(state->surface);
     if (state->app != NULL) ghostty_app_free(state->app);
@@ -226,6 +296,9 @@ bool gpui_ghostty_surface_is_alive(const gpui_ghostty_surface *state) {
 // new configuration can wait for the count to move instead of guessing a delay.
 uint64_t gpui_ghostty_surface_frame_count(gpui_ghostty_surface *state) {
     if (state == NULL) return 0;
+    // The renderer installs its layer shortly after the surface is created, so
+    // this is also the moment to attach to it.
+    gpui_ghostty_count_frames(state);
     return atomic_load_explicit(&state->frame_count, memory_order_acquire);
 }
 

@@ -1869,6 +1869,19 @@ fn execCommand(
             break :darwin;
         };
 
+        const hush = if (passwd.home) |home| hush: {
+            var dir = std.Io.Dir.openDirAbsolute(global.io(), home, .{}) catch |err| {
+                log.warn(
+                    "failed to open home dir, not checking for hushlogin err={}",
+                    .{err},
+                );
+                break :hush false;
+            };
+            defer dir.close(global.io());
+
+            break :hush if (dir.access(global.io(), ".hushlogin", .{})) true else |_| false;
+        } else false;
+
         // If we made it this far we're going to start building
         // the actual command.
         var args: std.ArrayList([:0]const u8) = try .initCapacity(
@@ -1904,11 +1917,16 @@ fn execCommand(
         // which we may not want. If we specify "-l" then we can avoid
         // this behavior but now the shell isn't a login shell.
         //
-        // login(1) prints its "Last login:" banner unless it is quiet.
-        // A shell surface should look like any other macOS terminal, but
-        // a surface that runs a command wants the command's own output as
-        // the first thing on screen, so it asks for "-q" by setting
-        // QUIET_LOGIN_ENV.
+        // There is another issue: `login(1)` on macOS 14.3 and earlier
+        // checked for ".hushlogin" in the working directory. This means
+        // that if we specify "-l" then we won't get hushlogin honored
+        // if its in the home directory (which is standard). To get
+        // around this, we check for hushlogin ourselves and if present
+        // specify the "-q" flag to login(1).
+        //
+        // A surface may also ask for that same quiet banner without a
+        // hushlogin file, because it runs a command whose own output should
+        // be the first thing on screen. It does so with QUIET_LOGIN_ENV.
         //
         // So to get all the behaviors we want, we specify "-l" but
         // execute "bash" (which is built-in to macOS). We then use
@@ -1926,7 +1944,7 @@ fn execCommand(
         //
         // Awesome.
         try args.append(alloc, "/usr/bin/login");
-        if (quiet_login) try args.append(alloc, "-q");
+        if (quiet_login or hush) try args.append(alloc, "-q");
         try args.append(alloc, "-flp");
         try args.append(alloc, username);
 
