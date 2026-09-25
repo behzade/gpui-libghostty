@@ -40,6 +40,9 @@ jobs:
         run: node --test .github/scripts/gpui-compat.test.mjs
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Frame readiness regression
+        if: runner.os == 'Linux'
+        run: bash .github/scripts/test-frame-readiness.sh
       - name: Clippy (including native build)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Library tests
