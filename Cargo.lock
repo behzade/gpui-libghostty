@@ -2089,7 +2089,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-libghostty"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-channel",
  "image",

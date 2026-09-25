@@ -1,7 +1,7 @@
 [package]
 name = "gpui-libghostty"
 description = "Native libghostty terminal component for GPUI"
-version = "0.3.0"
+version = "0.3.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
