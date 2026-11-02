@@ -8,6 +8,19 @@ license.workspace = true
 repository.workspace = true
 readme = "../../README.md"
 build = "build.rs"
+include = ["/src/**", "/shim/**", "/build.rs", "/build_support/**", "/patches/**", "/upstream/**", "/tests/**"]
+
+[package.metadata.release]
+pre-release-hook = ["cargo", "run", "--locked", "-p", "xtask", "--", "prepare-ghostty"]
+
+[build-dependencies]
+diffy.workspace = true
+flate2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+ureq.workspace = true
 
 [dependencies]
 async-channel.workspace = true

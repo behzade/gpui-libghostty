@@ -1,0 +1,2 @@
+# Unified diffs include unchanged blank lines prefixed with a space.
+*.patch whitespace=-blank-at-eol,-blank-at-eof

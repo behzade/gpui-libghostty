@@ -1,0 +1,125 @@
+--- a/src/renderer/OpenGL.zig
++++ b/src/renderer/OpenGL.zig
+@@ -13,6 +13,7 @@
+ const Renderer = rendererpkg.GenericRenderer(OpenGL);
+ const Dmabuf = @import("Dmabuf.zig");
+ pub const Device = @import("opengl/Device.zig");
++pub const host_context = apprt.runtime == apprt.embedded;
+ 
+ pub const GraphicsAPI = OpenGL;
+ pub const Target = @import("opengl/Target.zig");
+@@ -31,7 +32,7 @@
+ 
+ /// Triple-buffering gives the GPU room to pipeline renders without
+ /// having to wait on the apprt consuming previous frames.
+-pub const swap_chain_count = 3;
++pub const swap_chain_count = if (host_context) 1 else 3;
+ 
+ const log = std.log.scoped(.opengl);
+ 
+@@ -47,13 +48,25 @@
+ /// The shared render device.
+ device: *const Device,
+ 
+-egl_context: *gl.egl.Context,
++egl_context: if (host_context) void else *gl.egl.Context,
+ 
+ pub fn init(
+     alloc: Allocator,
+     device: *const Device,
+     opts: rendererpkg.Options,
+ ) !OpenGL {
++    if (comptime host_context) {
++        switch (opts.rt_surface.platform) {
++            .opengl => |platform| try prepareContext(platform.get_proc_address),
++            else => return error.UnsupportedPlatform,
++        }
++        return .{
++            .alloc = alloc,
++            .blending = opts.config.blending,
++            .device = device,
++            .egl_context = {},
++        };
++    }
+     const display = device.display;
+ 
+     // Bind to OpenGL API explicitly before we create the context,
+@@ -90,8 +103,10 @@
+ }
+ 
+ pub fn deinit(self: *OpenGL) void {
+-    self.device.display.releaseCurrent();
+-    self.egl_context.destroy(self.device.display) catch {};
++    if (comptime !host_context) {
++        self.device.display.releaseCurrent();
++        self.egl_context.destroy(self.device.display) catch {};
++    }
+     self.* = undefined;
+ }
+ 
+@@ -200,6 +215,7 @@
+ /// function pointers so all subsequent GL work on this thread is valid.
+ pub fn threadEnter(self: *OpenGL, surface: *apprt.Surface) !void {
+     _ = surface;
++    if (comptime host_context) return;
+     try self.device.display.makeCurrent(null, null, self.egl_context);
+     // Load our function pointers for this thread's threadlocal.
+     try prepareContext(&gl.egl.getProcAddress);
+@@ -209,6 +225,7 @@
+ /// thread; unbinds the context from this thread so it can be destroyed on
+ /// the main thread.
+ pub fn threadExit(self: *OpenGL) void {
++    if (comptime host_context) return;
+     self.device.display.releaseCurrent();
+     gl.glad.unload();
+ }
+@@ -217,7 +234,8 @@
+ pub fn surfaceSize(self: *const OpenGL) !struct { width: u32, height: u32 } {
+     _ = self;
+     var viewport: [4]gl.c.GLint = undefined;
+-    gl.glad.context.GetIntegerv.?(gl.c.GL_VIEWPORT, &viewport);
++    const get = gl.glad.context.GetIntegerv orelse return error.OpenGLNotLoaded;
++    get(gl.c.GL_VIEWPORT, &viewport);
+     return .{
+         .width = @intCast(viewport[2]),
+         .height = @intCast(viewport[3]),
+@@ -230,6 +248,9 @@
+ /// but now we need to do this manually.
+ pub fn setViewport(self: *const OpenGL, width: u32, height: u32) void {
+     _ = self;
++    // The host sets its viewport when it makes the surface current. Resize
++    // messages run on the render thread, which has no host context.
++    if (comptime host_context) return;
+     gl.viewport(0, 0, @intCast(width), @intCast(height)) catch |err| {
+         log.warn("failed to set OpenGL viewport err={}", .{err});
+     };
+@@ -268,6 +289,29 @@
+         .width = width,
+         .height = height,
+     });
++}
++
++/// Present into the host's default framebuffer while its context is current.
++pub fn presentToHost(self: *OpenGL, target: Target) !void {
++    _ = self;
++    try gl.disable(gl.c.GL_FRAMEBUFFER_SRGB);
++    defer gl.enable(gl.c.GL_FRAMEBUFFER_SRGB) catch {};
++    const read = try target.framebuffer.bind(.read);
++    defer read.unbind();
++    const draw = try (gl.Framebuffer{ .id = 0 }).bind(.draw);
++    defer draw.unbind();
++    try gl.blitFramebuffer(
++        0,
++        0,
++        @intCast(target.width),
++        @intCast(target.height),
++        0,
++        0,
++        @intCast(target.width),
++        @intCast(target.height),
++        .{ .color_buffer_bit = true },
++        .nearest,
++    );
+ }
+ 
+ /// Export a rendered target. Caller takes ownership

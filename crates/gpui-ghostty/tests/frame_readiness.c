@@ -173,6 +173,25 @@ static bool check_frame_readiness(bool deliver_old_frame, bool require_theme_rea
     return true;
 }
 
+static void clipboard_wakeup(void *userdata) { (void)userdata; }
+
+static bool check_primary_clipboard(void) {
+    gpui_ghostty_surface state = {.wakeup = clipboard_wakeup};
+    const char *mimes[] = {"text/plain"};
+    int request;
+    if (runtime_read_clipboard(&state, GHOSTTY_CLIPBOARD_PRIMARY, &request,
+            mimes, 1, false) != GHOSTTY_CLIPBOARD_READ_STARTED) return false;
+    bool selection = false;
+    void *taken = gpui_ghostty_surface_linux_take_clipboard_read(&state, &selection);
+    if (taken != &request || !selection || state.clipboard_request != NULL) return false;
+    // A mode-5522 MIME-list request must not start a clipboard data read.
+    if (runtime_read_clipboard(&state, GHOSTTY_CLIPBOARD_PRIMARY, &request,
+            NULL, 0, true) != GHOSTTY_CLIPBOARD_READ_UNSUPPORTED) return false;
+    if (state.clipboard_request != NULL) return false;
+    fprintf(stderr, "PASS: primary clipboard routing and MIME-list rejection\n");
+    return true;
+}
+
 int main(int argc, char **argv) {
     bool require_theme_ready = argc == 2 && strcmp(argv[1], "--require-theme-ready") == 0;
     if (argc != 1 && !require_theme_ready) {
@@ -181,5 +200,5 @@ int main(int argc, char **argv) {
     }
     bool control = check_frame_readiness(false, require_theme_ready);
     bool regression = check_frame_readiness(true, require_theme_ready);
-    return control && regression ? EXIT_SUCCESS : EXIT_FAILURE;
+    return control && regression && check_primary_clipboard() ? EXIT_SUCCESS : EXIT_FAILURE;
 }

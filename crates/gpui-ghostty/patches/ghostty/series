@@ -1,0 +1,15 @@
+build.zig.patch
+include/ghostty.h.patch
+pkg/apple-sdk/build.zig.patch
+src/apprt/embedded.zig.patch
+src/build/SharedDeps.zig.patch
+src/font/SharedGridSet.zig.patch
+src/font/embedded.zig.patch
+src/renderer/Metal.zig.patch
+src/renderer/OpenGL.zig.patch
+src/renderer/Thread.zig.patch
+src/renderer/generic.zig.patch
+src/renderer/metal/shaders.zig.patch
+src/renderer/opengl/Device.zig.patch
+src/renderer/opengl/Frame.zig.patch
+src/termio/Exec.zig.patch

@@ -29,14 +29,14 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
-          zig = zig-overlay.packages.${system}."0.16.0";
+          zig = zig-overlay.packages.${system}."0.17.0";
           linuxLibraries = with pkgs; [
             fontconfig
             freetype
             libGL
             libxkbcommon
             libxml2
-            llvmPackages.libcxx
+            llvmPackages_22.libcxx
             wayland
           ];
         in

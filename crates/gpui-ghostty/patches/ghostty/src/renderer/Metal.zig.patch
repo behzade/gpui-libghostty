@@ -1,0 +1,10 @@
+--- a/src/renderer/Metal.zig
++++ b/src/renderer/Metal.zig
+@@ -82,6 +82,7 @@
+             .view = switch (opts.rt_surface.platform) {
+                 .macos => |v| v.nsview,
+                 .ios => |v| v.uiview,
++                .opengl => return error.UnsupportedPlatform,
+             },
+         },
+ 

@@ -6,13 +6,16 @@ use std::{
     process::Command,
 };
 
+#[path = "build_support/ghostty.rs"]
+mod ghostty;
+
 const NATIVE_CACHE_VERSION: &str = "2";
 const SHARED_CACHE_NAME: &str = "gpui-libghostty";
 const ZIG_SYSTEM_PACKAGE_DIR_ENV: &str = "GHOSTTY_ZIG_SYSTEM_PACKAGE_DIR";
 const GHOSTTY_BUILD_OPTIONS: &[&str] = &[
-    // Keep in sync with vendor/ghostty/build.zig.zon. The copied source builds
+    // Keep in sync with upstream/ghostty.json. The copied source builds
     // inside the consumer's target directory, so Git would detect its tags.
-    "-Dversion-string=1.3.2-dev",
+    "-Dversion-string=1.4.0",
     "-Dapp-runtime=none",
     "-Demit-xcframework=false",
     "-Demit-macos-app=false",
@@ -27,9 +30,15 @@ const GHOSTTY_BUILD_OPTIONS: &[&str] = &[
 const LINUX_GHOSTTY_BUILD_OPTIONS: &[&str] = &["-Drenderer=opengl", "-Dcpu=baseline"];
 
 fn main() {
+    println!("cargo:rerun-if-changed=shim/ghostty_clipboard.h");
     println!("cargo:rerun-if-changed=shim/ghostty_surface.m");
     println!("cargo:rerun-if-changed=shim/ghostty_surface_linux.c");
-    println!("cargo:rerun-if-changed=vendor/ghostty");
+    println!("cargo:rerun-if-changed=upstream");
+    println!("cargo:rerun-if-changed=patches/ghostty");
+    println!("cargo:rerun-if-changed=build_support");
+    println!("cargo:rerun-if-env-changed=GHOSTTY_SOURCE_ARCHIVE");
+    println!("cargo:rerun-if-env-changed=GHOSTTY_SOURCE_CACHE_DIR");
+    println!("cargo:rerun-if-env-changed=CARGO_NET_OFFLINE");
     println!("cargo:rerun-if-env-changed=GHOSTTY_NATIVE_CACHE_DIR");
     println!("cargo:rerun-if-env-changed=GHOSTTY_ZIG_PACKAGE_CACHE_DIR");
     println!("cargo:rerun-if-env-changed={ZIG_SYSTEM_PACKAGE_DIR_ENV}");
@@ -49,8 +58,8 @@ fn main() {
     }
 
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
-    let source = manifest.join("vendor/ghostty");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"));
+    let source = ghostty_source(&manifest, &out_dir);
     let tools = NativeTools::detect();
     let fingerprint = native_fingerprint(&source, &tools);
     let cache_root = native_cache_root(&out_dir);
@@ -99,8 +108,8 @@ fn main() {
 
 fn build_linux() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
-    let source = manifest.join("vendor/ghostty");
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo output directory"));
+    let source = ghostty_source(&manifest, &out_dir);
     let zig = env::var_os("ZIG").unwrap_or_else(|| "zig".into());
     let fingerprint = linux_native_fingerprint(&source, &zig);
     let cache_root = native_cache_root(&out_dir);
@@ -130,7 +139,7 @@ fn build_linux() {
     println!("cargo:rustc-link-lib=static=ghostty-internal");
     println!("cargo:rustc-link-lib=static=gpui_ghostty_surface_linux");
     // The bundled fontconfig archive calls libxml2. Zig's libc++ headers also
-    // require a system libc++ runtime from LLVM 21 or newer.
+    // require a system libc++ runtime from LLVM 22 or newer.
     for library in ["c++", "xml2", "dl", "pthread", "m"] {
         println!("cargo:rustc-link-lib={library}");
     }
@@ -388,7 +397,7 @@ fn build_ghostty(
     let status = status.unwrap_or_else(|error| {
         cleanup_build(&build_source, &staging_prefix);
         panic!(
-            "run Zig to build libghostty with {:?}: {error}; install Zig 0.16 or set ZIG",
+            "run Zig to build libghostty with {:?}: {error}; install Zig 0.17 or set ZIG",
             tools.zig
         )
     });
@@ -435,7 +444,7 @@ fn native_fingerprint(source: &Path, tools: &NativeTools) -> String {
         .output()
         .unwrap_or_else(|error| {
             panic!(
-                "read Zig version from {:?}: {error}; install Zig 0.16 or set ZIG",
+                "read Zig version from {:?}: {error}; install Zig 0.17 or set ZIG",
                 tools.zig
             )
         });
@@ -459,7 +468,7 @@ fn native_fingerprint(source: &Path, tools: &NativeTools) -> String {
 fn hash_tree(root: &Path, directory: &Path, hash: &mut Fnv128) {
     let mut entries: Vec<_> = std::fs::read_dir(directory)
         .unwrap_or_else(|error| panic!("read {}: {error}", directory.display()))
-        .map(|entry| entry.expect("read vendored Ghostty source entry"))
+        .map(|entry| entry.expect("read Ghostty source entry"))
         .collect();
     entries.sort_by_key(std::fs::DirEntry::file_name);
 
@@ -479,10 +488,7 @@ fn hash_tree(root: &Path, directory: &Path, hash: &mut Fnv128) {
                 .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
             hash.write_field(&contents);
         } else {
-            panic!(
-                "unsupported entry in vendored Ghostty source: {}",
-                path.display()
-            );
+            panic!("unsupported entry in Ghostty source: {}", path.display());
         }
     }
 }
@@ -512,6 +518,17 @@ impl Fnv128 {
     const fn finish(&self) -> u128 {
         self.0
     }
+}
+
+fn ghostty_source(manifest: &Path, out_dir: &Path) -> PathBuf {
+    let cache = cache_dir(
+        out_dir,
+        "GHOSTTY_SOURCE_CACHE_DIR",
+        "source",
+        "ghostty-source-cache",
+    );
+    ghostty::prepare(manifest, &out_dir.join("ghostty-source"), &cache)
+        .unwrap_or_else(|error| panic!("prepare Ghostty source: {error}"))
 }
 
 fn native_cache_root(out_dir: &Path) -> PathBuf {
@@ -616,8 +633,8 @@ fn shared_target_root(out_dir: &Path) -> PathBuf {
 
 fn copy_tree(source: &Path, destination: &Path) {
     std::fs::create_dir_all(destination).expect("create writable Ghostty source directory");
-    for entry in std::fs::read_dir(source).expect("read vendored Ghostty source") {
-        let entry = entry.expect("read vendored Ghostty source entry");
+    for entry in std::fs::read_dir(source).expect("read Ghostty source") {
+        let entry = entry.expect("read Ghostty source entry");
         let source_path = entry.path();
         let destination_path = destination.join(entry.file_name());
         let file_type = entry.file_type().expect("read Ghostty source entry type");
@@ -627,7 +644,7 @@ fn copy_tree(source: &Path, destination: &Path) {
             std::fs::copy(&source_path, &destination_path).expect("copy Ghostty source file");
         } else {
             panic!(
-                "unsupported entry in vendored Ghostty source: {}",
+                "unsupported entry in Ghostty source: {}",
                 source_path.display()
             );
         }

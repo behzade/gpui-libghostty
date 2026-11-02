@@ -1,0 +1,31 @@
+--- a/src/renderer/Thread.zig
++++ b/src/renderer/Thread.zig
+@@ -19,7 +19,12 @@
+ 
+ const CURSOR_BLINK_INTERVAL = 600;
+ 
+-/// Whether calls to `drawFrame` must be done from the app thread.
++/// Embedded OpenGL uses a context owned by the application thread.
++const must_draw_from_app_thread = if (@hasDecl(apprt.App, "must_draw_from_app_thread"))
++    apprt.App.must_draw_from_app_thread
++else
++    false;
++
+ ///
+ /// The type used for sending messages to the IO thread. For now this is
+ /// hardcoded with a capacity. We can make this a comptime parameter in
+@@ -467,8 +472,12 @@
+     // when we're forced to via `now`.
+     if (!now and self.renderer.hasVsync()) return;
+ 
+-    self.renderer.drawFrame(false) catch |err|
+-        log.warn("error drawing err={}", .{err});
++    if (must_draw_from_app_thread) {
++        _ = self.renderer.surface_mailbox.push(.redraw, .instant);
++    } else {
++        self.renderer.drawFrame(false) catch |err|
++            log.warn("error drawing err={}", .{err});
++    }
+ }
+ 
+ fn wakeupCallback(

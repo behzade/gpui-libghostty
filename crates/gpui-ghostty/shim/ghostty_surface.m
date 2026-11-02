@@ -6,6 +6,7 @@
 #import <stdlib.h>
 #import <string.h>
 #import <ghostty.h>
+#include "ghostty_clipboard.h"
 
 // Forward declaration so the presented frames of a surface can be reported back
 // to it.
@@ -118,30 +119,36 @@ static bool runtime_action(ghostty_app_t app, ghostty_target_s target, ghostty_a
     return false;
 }
 
-static bool runtime_read_clipboard(void *userdata, ghostty_clipboard_e location, void *request) {
-    (void)location;
+static ghostty_clipboard_read_result_e runtime_read_clipboard(
+    void *userdata, ghostty_clipboard_e location, void *request,
+    const char *const *mimes, size_t count, bool list
+) {
     gpui_ghostty_surface *state = userdata;
-    if (state->surface == NULL) return false;
+    if (!gpui_ghostty_clipboard_wants_text(mimes, count, list)) {
+        return GHOSTTY_CLIPBOARD_READ_UNSUPPORTED;
+    }
+    if (location != GHOSTTY_CLIPBOARD_STANDARD) return GHOSTTY_CLIPBOARD_READ_UNSUPPORTED;
+    if (state->surface == NULL) return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE;
     NSString *text = [[NSPasteboard generalPasteboard] stringForType:NSPasteboardTypeString];
-    if (text == nil) return false;
-    ghostty_surface_complete_clipboard_request(state->surface, text.UTF8String, request, false);
-    return true;
+    if (text == nil) return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE;
+    const char *utf8 = text.UTF8String;
+    if (utf8 == NULL || strlen(utf8) != [text lengthOfBytesUsingEncoding:NSUTF8StringEncoding]) {
+        return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE;
+    }
+    gpui_ghostty_complete_text(state->surface, text.UTF8String, request);
+    return GHOSTTY_CLIPBOARD_READ_STARTED;
 }
 
 static void runtime_confirm_read_clipboard(
     void *userdata,
-    const char *text,
+    const ghostty_clipboard_confirm_s *confirm,
     void *request,
     ghostty_clipboard_request_e kind
 ) {
     gpui_ghostty_surface *state = userdata;
     if (state->surface != NULL) {
-        int operation = kind == GHOSTTY_CLIPBOARD_REQUEST_PASTE ? 0 : 1;
-        bool approved = state->approve_clipboard != NULL &&
-            state->approve_clipboard(state->wakeup_userdata, operation, text);
-        // Completing with empty text releases Ghostty's request without exposing
-        // clipboard contents or inserting an unsafe paste.
-        ghostty_surface_complete_clipboard_request(state->surface, approved ? text : "", request, true);
+        gpui_ghostty_confirm_clipboard(state->surface, confirm, request, kind,
+            state->approve_clipboard, state->wakeup_userdata);
     }
 }
 
@@ -153,12 +160,17 @@ static void runtime_write_clipboard(
     bool confirm
 ) {
     gpui_ghostty_surface *state = userdata;
-    (void)location;
+    if (location != GHOSTTY_CLIPBOARD_STANDARD) return;
     for (size_t index = 0; index < count; index++) {
-        if (strcmp(content[index].mime, "text/plain") != 0) continue;
+        char *copy = gpui_ghostty_clipboard_text(&content[index]);
+        if (copy == NULL) continue;
         if (confirm && (state->approve_clipboard == NULL ||
-            !state->approve_clipboard(state->wakeup_userdata, 2, content[index].data))) return;
-        NSString *text = [NSString stringWithUTF8String:content[index].data];
+            !state->approve_clipboard(state->wakeup_userdata, 2, copy))) {
+            free(copy);
+            return;
+        }
+        NSString *text = [NSString stringWithUTF8String:copy];
+        free(copy);
         if (text == nil) return;
         NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
         [pasteboard clearContents];

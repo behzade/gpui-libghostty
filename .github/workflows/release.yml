@@ -49,6 +49,14 @@ jobs:
           echo "crate=$crate" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Bundle pinned Ghostty source
+        if: steps.release.outputs.crate == 'gpui-libghostty'
+        run: |
+          cargo run --locked -p xtask -- prepare-ghostty
+          bash .github/scripts/check-release-tree.sh
+          cargo package --locked --no-verify --allow-dirty -p gpui-libghostty
+          python3 .github/scripts/check-ghostty-package.py target/package/gpui-libghostty-*.crate
+
       - name: Authenticate with crates.io
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
@@ -57,4 +65,10 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         # Native builds and tests must pass on both platforms in `checks` first.
-        run: cargo publish --no-verify --package "${{ steps.release.outputs.crate }}"
+        run: |
+          bash .github/scripts/check-release-tree.sh
+          if [[ "${{ steps.release.outputs.crate }}" == gpui-libghostty ]]; then
+            cargo publish --locked --no-verify --allow-dirty --package gpui-libghostty
+          else
+            cargo publish --locked --no-verify --package "${{ steps.release.outputs.crate }}"
+          fi

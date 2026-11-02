@@ -29,16 +29,16 @@ Supports macOS and Linux with Wayland.
 ## Requirements
 
 - Rust 1.95
-- macOS and Xcode command-line tools, or Wayland with EGL, libc++ 21 or newer,
+- macOS and Xcode command-line tools, or Wayland with EGL, libc++ 22 or newer,
   libxml2, and desktop OpenGL 4.3
-- Zig 0.16
+- Zig 0.17
 - Neovim for `gpui-neovim`
 
 The default Nix development shell provides the Rust tools, Zig, Neovim, and
 the required Linux build and runtime libraries. macOS still requires Xcode
 command-line tools because the native build uses `xcrun`.
 
-On Ubuntu 24.04, install `libc++-21-dev` and `libc++abi-21-dev` from
+On Ubuntu 24.04, install `libc++-22-dev` and `libc++abi-22-dev` from
 [LLVM's APT repository](https://apt.llvm.org/), plus `libxml2-dev` from Ubuntu.
 
 Set `ZIG` to select a non-default Zig executable. Set `GPUI_NVIM` or assign
@@ -93,6 +93,9 @@ terminal.update(cx, |terminal, _| {
 ```
 
 ### Clipboard approval
+
+The adapter supports plain text clipboard data. Binary formats and MIME-list
+requests are not supported.
 
 Clipboard operations requiring approval are denied unless `clipboard_approval`
 accepts them. Explicit Ghostty `allow`/`deny` settings still apply.
@@ -157,8 +160,25 @@ generated types across your app. The Neovim binding also defines `Terminal`.
 Checks cover the workspace's Zed revision and `gpui-pre` 0.3.4. GPUI API changes
 may require an adapter update; arbitrary revisions are not guaranteed.
 
+## Ghostty source and local changes
+
+Ghostty's source is pinned by commit and checksum. Git checkouts fetch it
+automatically during the native build; published crates already include it.
+Our changes to Ghostty live in `crates/gpui-ghostty/patches/ghostty/` and apply
+to a build copy, leaving upstream files unchanged. Rust APIs and consumer
+build commands are unchanged.
+
+Maintainers can prepare the ignored upstream tree before packaging with:
+
+```sh
+cargo run --locked -p xtask -- prepare-ghostty
+```
+
+See [source preparation](crates/gpui-ghostty/upstream/README.md) for offline
+builds and release packaging, and [our patch list](crates/gpui-ghostty/patches/ghostty/README.md)
+for the integration changes.
+
 ## License
 
-The workspace is MIT-licensed. Vendored Ghostty remains MIT-licensed; see
-`crates/gpui-ghostty/vendor/ghostty/LICENSE` and
-`crates/gpui-ghostty/vendor/ghostty/VENDOR.md`.
+The workspace and Ghostty are MIT-licensed; see
+`crates/gpui-ghostty/upstream/LICENSE` for Ghostty's license.

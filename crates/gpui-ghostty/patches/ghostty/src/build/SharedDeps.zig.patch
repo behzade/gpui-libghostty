@@ -1,0 +1,70 @@
+--- a/src/build/SharedDeps.zig
++++ b/src/build/SharedDeps.zig
+@@ -135,12 +135,16 @@
+     b: *std.Build,
+     target: std.Build.ResolvedTarget,
+ ) !void {
+-    // Update our metallib
+-    self.metallib = .create(b, .{
+-        .name = "Ghostty",
+-        .target = target,
+-        .sources = &.{b.path("src/renderer/shaders/shaders.metal")},
+-    });
++    // Embedded runtimes compile the Metal source at runtime so consumers do
++    // not need Xcode's optional Metal toolchain merely to build libghostty.
++    self.metallib = if (self.config.app_runtime == .none)
++        null
++    else
++        .create(b, .{
++            .name = "Ghostty",
++            .target = target,
++            .sources = &.{b.path("src/renderer/shaders/shaders.metal")},
++        });
+ 
+     // Change our config
+     const config = try b.allocator.create(Config);
+@@ -500,11 +504,16 @@
+     if (step.rootModuleTarget().os.tag.isDarwin()) {
+         try @import("apple_sdk").addPaths(b, step);
+ 
+-        const metallib = self.metallib.?;
+-        metallib.output.addStepDependencies(&step.step);
+-        step.root_module.addAnonymousImport("ghostty_metallib", .{
+-            .root_source_file = metallib.output,
+-        });
++        if (self.metallib) |metallib| {
++            metallib.output.addStepDependencies(&step.step);
++            step.root_module.addAnonymousImport("ghostty_metallib", .{
++                .root_source_file = metallib.output,
++            });
++        } else {
++            step.root_module.addAnonymousImport("ghostty_metallib", .{
++                .root_source_file = b.path("src/renderer/shaders/shaders.metal"),
++            });
++        }
+     }
+ 
+     // Other dependencies, mostly pure Zig
+@@ -653,15 +662,18 @@
+         }
+     }
+ 
+-    // If we're building an exe then we have additional dependencies.
+-    if (step.kind != .lib) {
+-        // We always statically compile glad
++    // OpenGL libraries need their own GLAD implementation because the host
++    // supplies only a context and procedure lookup callback.
++    if (step.kind != .lib or self.config.renderer == .opengl) {
+         step.root_module.addIncludePath(b.path("vendor/glad/include/"));
+         step.root_module.addCSourceFile(.{
+             .file = b.path("vendor/glad/src/gl.c"),
+             .flags = &.{},
+         });
+-
++    }
++
++    // Executables also need the platform runtime libraries.
++    if (step.kind != .lib) {
+         // Link EGL for GTK.
+         if (self.config.app_runtime == .gtk) {
+             step.root_module.addCSourceFile(.{

@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include <ghostty.h>
+#include "ghostty_clipboard.h"
 
 typedef bool (*gpui_ghostty_make_current_cb)(void *userdata);
 typedef void (*gpui_ghostty_context_cb)(void *userdata);
@@ -110,29 +111,35 @@ static bool runtime_action(ghostty_app_t app, ghostty_target_s target, ghostty_a
     return true;
 }
 
-static bool runtime_read_clipboard(void *userdata, ghostty_clipboard_e location, void *request) {
+static ghostty_clipboard_read_result_e runtime_read_clipboard(
+    void *userdata, ghostty_clipboard_e location, void *request,
+    const char *const *mimes, size_t count, bool list
+) {
     gpui_ghostty_surface *state = userdata;
-    if (state->clipboard_request != NULL) return false;
+    if (!gpui_ghostty_clipboard_wants_text(mimes, count, list)) {
+        return GHOSTTY_CLIPBOARD_READ_UNSUPPORTED;
+    }
+    if (location != GHOSTTY_CLIPBOARD_STANDARD && location != GHOSTTY_CLIPBOARD_SELECTION &&
+        location != GHOSTTY_CLIPBOARD_PRIMARY) {
+        return GHOSTTY_CLIPBOARD_READ_UNSUPPORTED;
+    }
+    if (state->clipboard_request != NULL) return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE;
     state->clipboard_request = request;
     state->clipboard_location = location;
     runtime_wakeup(state);
-    return true;
+    return GHOSTTY_CLIPBOARD_READ_STARTED;
 }
 
 static void runtime_confirm_read_clipboard(
     void *userdata,
-    const char *text,
+    const ghostty_clipboard_confirm_s *confirm,
     void *request,
     ghostty_clipboard_request_e kind
 ) {
     gpui_ghostty_surface *state = userdata;
     if (state->surface != NULL) {
-        int operation = kind == GHOSTTY_CLIPBOARD_REQUEST_PASTE ? 0 : 1;
-        bool approved = state->approve_clipboard != NULL &&
-            state->approve_clipboard(state->wakeup_userdata, operation, text);
-        // Completing with empty text releases Ghostty's request without exposing
-        // clipboard contents or inserting an unsafe paste.
-        ghostty_surface_complete_clipboard_request(state->surface, approved ? text : "", request, true);
+        gpui_ghostty_confirm_clipboard(state->surface, confirm, request, kind,
+            state->approve_clipboard, state->wakeup_userdata);
     }
 }
 
@@ -144,12 +151,16 @@ static void runtime_write_clipboard(
     bool confirm
 ) {
     gpui_ghostty_surface *state = userdata;
+    if (location != GHOSTTY_CLIPBOARD_STANDARD && location != GHOSTTY_CLIPBOARD_SELECTION &&
+        location != GHOSTTY_CLIPBOARD_PRIMARY) return;
     for (size_t index = 0; index < count; index++) {
-        if (strcmp(content[index].mime, "text/plain") != 0) continue;
+        char *copy = gpui_ghostty_clipboard_text(&content[index]);
+        if (copy == NULL) continue;
         if (confirm && (state->approve_clipboard == NULL ||
-            !state->approve_clipboard(state->wakeup_userdata, 2, content[index].data))) return;
-        char *copy = strdup(content[index].data);
-        if (copy == NULL) return;
+            !state->approve_clipboard(state->wakeup_userdata, 2, copy))) {
+            free(copy);
+            return;
+        }
         free(state->clipboard_write);
         state->clipboard_write = copy;
         state->clipboard_write_location = location;
@@ -390,7 +401,7 @@ void *gpui_ghostty_surface_linux_take_clipboard_read(
     if (state == NULL || state->clipboard_request == NULL) return NULL;
     void *request = state->clipboard_request;
     state->clipboard_request = NULL;
-    *selection = state->clipboard_location == GHOSTTY_CLIPBOARD_SELECTION;
+    *selection = state->clipboard_location != GHOSTTY_CLIPBOARD_STANDARD;
     return request;
 }
 
@@ -400,7 +411,7 @@ void gpui_ghostty_surface_linux_complete_clipboard_read(
     const char *text
 ) {
     if (state != NULL && state->surface != NULL && request != NULL && text != NULL) {
-        ghostty_surface_complete_clipboard_request(state->surface, text, request, false);
+        gpui_ghostty_complete_text(state->surface, text, request);
     }
 }
 
@@ -411,7 +422,7 @@ char *gpui_ghostty_surface_linux_take_clipboard_write(
     if (state == NULL || state->clipboard_write == NULL) return NULL;
     char *text = state->clipboard_write;
     state->clipboard_write = NULL;
-    *selection = state->clipboard_write_location == GHOSTTY_CLIPBOARD_SELECTION;
+    *selection = state->clipboard_write_location != GHOSTTY_CLIPBOARD_STANDARD;
     return text;
 }
 

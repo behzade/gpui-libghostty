@@ -1,0 +1,16 @@
+--- a/pkg/apple-sdk/build.zig
++++ b/pkg/apple-sdk/build.zig
+@@ -61,6 +61,13 @@
+                     .verbose = false,
+                 },
+             ) catch break :darwin;
++
++            // Respect the SDK selected by the embedding application's build.
++            if (b.graph.environ_map.get("SDKROOT")) |sdk| {
++                const include_dir = try std.fs.path.join(b.allocator, &.{ sdk, "usr", "include" });
++                libc.include_dir = include_dir;
++                libc.sys_include_dir = include_dir;
++            }
+ 
+             // Render the file compatible with the `--libc` Zig flag.
+             var stream: std.Io.Writer.Allocating = .init(b.allocator);

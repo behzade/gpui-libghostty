@@ -1,0 +1,54 @@
+--- a/src/renderer/generic.zig
++++ b/src/renderer/generic.zig
+@@ -839,9 +839,12 @@
+         }
+ 
+         pub fn deinit(self: *Self) void {
+-            // This only deinitializes and frees CPU-side state
+-            // and does not free GPU resources like the swap chain and
+-            // shaders. Those are freed with `releaseGpuResources`.
++            if (comptime @hasDecl(GraphicsAPI, "host_context") and GraphicsAPI.host_context) {
++                self.releaseAllGpuResources();
++            }
++            // GPU resources have now been released, either by the render
++            // thread or above while the host context is current. Free the
++            // remaining CPU-side state.
+ 
+             if (self.overlay) |*overlay| overlay.deinit(self.alloc);
+             self.terminal_state.deinit(self.alloc);
+@@ -912,6 +915,12 @@
+         /// render thread. Releases all GPU resources before the API tears down
+         /// its context, since after this the GL context will be gone.
+         pub fn threadExit(self: *Self) void {
++            if (comptime @hasDecl(GraphicsAPI, "host_context") and GraphicsAPI.host_context) return;
++            self.releaseAllGpuResources();
++            if (@hasDecl(GraphicsAPI, "threadExit")) self.api.threadExit();
++        }
++
++        fn releaseAllGpuResources(self: *Self) void {
+             {
+                 self.draw_mutex.lockUncancelable(global.io());
+                 defer self.draw_mutex.unlock(global.io());
+@@ -934,11 +943,6 @@
+                     img.deinit(self.alloc);
+                     self.bg_image = null;
+                 }
+-            }
+-
+-            // If our API has to do things on thread exit, let it.
+-            if (@hasDecl(GraphicsAPI, "threadExit")) {
+-                self.api.threadExit();
+             }
+         }
+ 
+@@ -1220,6 +1224,10 @@
+         pub fn setVisible(self: *Self, visible: bool) void {
+             self.visible = visible;
+             self.syncDisplayLink(null, null);
++
++            // The host context is not current on this thread. Its resources
++            // remain valid while hidden and are freed on main-thread teardown.
++            if (comptime @hasDecl(GraphicsAPI, "host_context") and GraphicsAPI.host_context) return;
+ 
+             // When we're hidden, release our GPU resources.
+             if (!visible) {

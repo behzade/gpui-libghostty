@@ -1,0 +1,22 @@
+--- a/src/renderer/opengl/Frame.zig
++++ b/src/renderer/opengl/Frame.zig
+@@ -57,6 +57,19 @@
+ pub fn complete(self: *const Self, sync: bool) void {
+     _ = sync;
+ 
++    if (comptime OpenGL.host_context) {
++        const health: Health = if (gl.errors.getError()) health: {
++            self.renderer.api.presentToHost(self.target.*) catch |err| {
++                log.warn("failed to present host frame: err={}", .{err});
++                break :health .unhealthy;
++            };
++            gl.finish();
++            break :health if (gl.errors.getError()) .healthy else |_| .unhealthy;
++        } else |_| .unhealthy;
++        self.renderer.frameCompleted(health);
++        return;
++    }
++
+     // If there are any GL errors, consider the frame unhealthy.
+     const health: Health = if (gl.errors.getError()) .healthy else |_| .unhealthy;
+ 

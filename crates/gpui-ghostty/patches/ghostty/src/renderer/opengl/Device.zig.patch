@@ -1,0 +1,33 @@
+--- a/src/renderer/opengl/Device.zig
++++ b/src/renderer/opengl/Device.zig
+@@ -12,6 +12,7 @@
+ const Allocator = std.mem.Allocator;
+ const gl = @import("opengl");
+ const egl = gl.egl;
++const host_context = @import("../../apprt.zig").runtime == @import("../../apprt.zig").embedded;
+ 
+ const log = std.log.scoped(.opengl);
+ 
+@@ -28,16 +29,20 @@
+ /// The lifecycle of this display is always managed externally, both in the
+ /// cases where we were given a display as a config option, or we use the
+ /// systemwide default display that is cleaned up by the OS.
+-display: *egl.Display,
++display: if (host_context) void else *egl.Display,
+ 
+ /// The EGL config used to create surface renderer contexts. Chosen
+ /// once here so that all contexts share compatible capabilities.
+-config: *egl.Config,
++config: if (host_context) void else *egl.Config,
+ 
+ pub fn init(alloc: Allocator, options: Options) !*Device {
+     const self = try alloc.create(Device);
+     errdefer alloc.destroy(self);
+ 
++    if (comptime host_context) {
++        self.* = .{ .display = {}, .config = {} };
++        return self;
++    }
+     try egl.load();
+ 
+     const display = options.display orelse egl.Display.initPlatform(

@@ -29,7 +29,7 @@ jobs:
           components: rustfmt, clippy
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: 0.17.0
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: bash .github/scripts/install-linux-deps.sh
@@ -40,6 +40,17 @@ jobs:
         run: node --test .github/scripts/gpui-compat.test.mjs
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Source preparation tests
+        run: cargo test --locked -p xtask
+      - name: Verify upstream source and patches
+        run: cargo run --locked -p xtask -- prepare-ghostty
+      - name: Check published source bundle
+        run: |
+          bash .github/scripts/check-release-tree.sh
+          cargo package --locked --no-verify --allow-dirty -p gpui-libghostty
+          python3 .github/scripts/check-ghostty-package.py target/package/gpui-libghostty-*.crate
+      - name: Clipboard ABI and approval regression
+        run: bash .github/scripts/test-clipboard.sh
       - name: Frame readiness regression
         if: runner.os == 'Linux'
         run: bash .github/scripts/test-frame-readiness.sh

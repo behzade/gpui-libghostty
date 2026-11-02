@@ -1,0 +1,88 @@
+--- a/src/apprt/embedded.zig
++++ b/src/apprt/embedded.zig
+@@ -6,6 +6,7 @@
+ 
+ const std = @import("std");
+ const builtin = @import("builtin");
++const build_config = @import("../build_config.zig");
+ const assert = @import("../quirks.zig").inlineAssert;
+ const Allocator = std.mem.Allocator;
+ const objc = @import("objc");
+@@ -28,6 +29,10 @@
+ pub const resourcesDir = internal_os.resourcesDir;
+ 
+ pub const App = struct {
++    /// OpenGL contexts are owned by the embedder and current on its application
++    /// thread, so renderer-thread draws must be routed back there.
++    pub const must_draw_from_app_thread = build_config.renderer == .opengl;
++
+     /// Because we only expect the embedding API to be used in embedded
+     /// environments, the options are extern so that we can expose it
+     /// directly to a C callconv and not pay for any translation costs.
+@@ -382,6 +387,7 @@
+ pub const Platform = union(PlatformTag) {
+     macos: MacOS,
+     ios: IOS,
++    opengl: OpenGL,
+ 
+     // If our build target for libghostty is not darwin then we do
+     // not include macos support at all.
+@@ -395,6 +401,12 @@
+         uiview: objc.Object,
+     } else void;
+ 
++    const GLProc = *const fn () callconv(.c) void;
++
++    pub const OpenGL = struct {
++        get_proc_address: *const fn ([*:0]const u8) callconv(.c) ?GLProc,
++    };
++
+     // The C ABI compatible version of this union. The tag is expected
+     // to be stored elsewhere.
+     pub const C = extern union {
+@@ -404,6 +416,10 @@
+ 
+         ios: extern struct {
+             uiview: ?*anyopaque,
++        },
++
++        opengl: extern struct {
++            get_proc_address: ?*const fn ([*:0]const u8) callconv(.c) ?GLProc,
+         },
+     };
+ 
+@@ -424,6 +440,11 @@
+                     break :ios error.UIViewMustBeSet);
+                 break :ios .{ .ios = .{ .uiview = uiview } };
+             } else error.UnsupportedPlatform,
++
++            .opengl => .{ .opengl = .{
++                .get_proc_address = c_platform.opengl.get_proc_address orelse
++                    return error.OpenGLGetProcAddressMustBeSet,
++            } },
+         };
+     }
+ };
+@@ -434,6 +455,7 @@
+ 
+     macos = 1,
+     ios = 2,
++    opengl = 3,
+ };
+ 
+ pub const EnvVar = extern struct {
+@@ -704,11 +726,9 @@
+             .standard => true,
+             .selection => self.app.opts.supports_selection_clipboard,
+ 
+-            // No embedder can serve the primary selection: the embedding
+-            // API has no option to declare support for it, and macOS (the
+-            // only GUI embedder) has no primary selection. The selection
+-            // flag above covers a distinct custom pasteboard, not this.
+-            .primary => false,
++            // Our Wayland host maps selection clipboard operations to the
++            // compositor's primary selection. macOS has no such clipboard.
++            .primary => self.platform == .opengl and self.app.opts.supports_selection_clipboard,
+         };
+     }
+ 

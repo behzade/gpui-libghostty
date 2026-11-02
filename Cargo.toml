@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/gpui-ghostty", "crates/gpui-neovim", "tests/gpui-compat"]
+members = ["crates/gpui-ghostty", "crates/gpui-neovim", "tests/gpui-compat", "xtask"]
 
 [workspace.package]
 version = "0.2.0"
@@ -10,6 +10,13 @@ license = "MIT"
 repository = "https://github.com/behzade/gpui-libghostty"
 
 [workspace.dependencies]
+diffy = "0.4"
+flate2 = "1.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 async-channel = "2.5"
 # Used only by adapter tests and the example. Consumers choose their own GPUI.
 gpui = { version = "0.2.2", git = "https://github.com/zed-industries/zed", rev = "cc053a4a6fa2fd0e8793201ed9099466af1be0b1" }

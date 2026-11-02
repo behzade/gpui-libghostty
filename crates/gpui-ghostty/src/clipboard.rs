@@ -5,7 +5,7 @@ use std::sync::Arc;
 pub enum ClipboardOperation {
     /// A paste rejected by Ghostty's unsafe-paste protection.
     Paste,
-    /// A terminal program requesting clipboard contents using OSC 52.
+    /// A terminal program requesting clipboard contents using OSC 52 or the Kitty clipboard protocol.
     Read,
     /// A terminal program writing the clipboard when configured to ask.
     Write,
