@@ -322,7 +322,14 @@ impl NativeTools {
     }
 
     fn toolchain(&self) -> PathBuf {
-        Path::new(&self.developer_dir).join("Toolchains/XcodeDefault.xctoolchain/usr/bin")
+        let developer_dir = Path::new(&self.developer_dir);
+        let xcode = developer_dir.join("Toolchains/XcodeDefault.xctoolchain/usr/bin");
+        if xcode.is_dir() {
+            xcode
+        } else {
+            // Standalone Command Line Tools keep their binaries directly under usr/bin.
+            developer_dir.join("usr/bin")
+        }
     }
 
     fn xcode_tool(&self, name: &str) -> PathBuf {
