@@ -1,0 +1,20 @@
+[package]
+name = "gpui-libghostty-examples"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[package.metadata.release]
+release = false
+
+[[bin]]
+name = "neovim"
+path = "neovim.rs"
+
+[dependencies]
+gpui.workspace = true
+gpui-libghostty = { path = "../crates/gpui-ghostty" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "cc053a4a6fa2fd0e8793201ed9099466af1be0b1", features = ["font-kit", "runtime_shaders", "wayland"] }
+
+[lints]
+workspace = true

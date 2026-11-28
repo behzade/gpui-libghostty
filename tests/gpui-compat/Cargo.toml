@@ -5,10 +5,9 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-# Test fixture only: neither published library selects this GPUI distribution.
+# Test fixture only: the published library does not select this GPUI distribution.
 chosen-ui = { package = "gpui-pre", version = "=0.3.4", default-features = false }
 terminal-library = { package = "gpui-libghostty", path = "../../crates/gpui-ghostty" }
-editor-library = { package = "gpui-neovim", path = "../../crates/gpui-neovim" }
 
 [dev-dependencies]
 gpui.workspace = true

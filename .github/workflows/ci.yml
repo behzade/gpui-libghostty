@@ -57,10 +57,10 @@ jobs:
       - name: Clippy (including native build)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Library tests
-        run: cargo test -p gpui-libghostty -p gpui-neovim --lib --locked
+        run: cargo test -p gpui-libghostty --lib --locked
       - name: GPUI compatibility (Zed Git)
         run: cargo test -p gpui-compat --test zed --locked
       - name: GPUI compatibility (gpui-pre)
         run: cargo test -p gpui-compat --lib --locked
       - name: Doc tests (including API safety checks)
-        run: cargo test -p gpui-libghostty -p gpui-neovim --doc --locked
+        run: cargo test -p gpui-libghostty --doc --locked

@@ -1,28 +1,23 @@
 # gpui-libghostty
 
-Native Ghostty terminal and embedded Neovim components for GPUI.
+Native Ghostty terminal component for GPUI.
 
 ## Demo
 
-Embedded Neovim editing this project's README with completion:
+Neovim running inside `gpui-libghostty`, editing this project's README with completion:
 
 https://github.com/user-attachments/assets/140e3552-1074-4994-b91d-d0966fe623c9
 
 ## Status
 Project status is alpha, expect bugs and instability.
 
-## Crates
+## Crate
 
-Published on crates.io: [gpui-libghostty](https://crates.io/crates/gpui-libghostty)
-and [gpui-neovim](https://crates.io/crates/gpui-neovim). Add either to your project:
+Published on crates.io: [gpui-libghostty](https://crates.io/crates/gpui-libghostty). Add it to your project:
 
 ```sh
 cargo add gpui-libghostty
-cargo add gpui-neovim
 ```
-
-- `gpui-libghostty` embeds a native Ghostty terminal in GPUI.
-- `gpui-neovim` embeds Neovim in GPUI.
 
 Supports macOS and Linux with Wayland.
 
@@ -32,7 +27,7 @@ Supports macOS and Linux with Wayland.
 - macOS and Xcode command-line tools, or Wayland with EGL, libc++ 22 or newer,
   libxml2, and desktop OpenGL 4.3
 - Zig 0.17
-- Neovim for `gpui-neovim`
+- Neovim (optional, for the standalone Neovim example)
 
 The default Nix development shell provides the Rust tools, Zig, Neovim, and
 the required Linux build and runtime libraries. macOS still requires Xcode
@@ -41,14 +36,13 @@ command-line tools because the native build uses `xcrun`.
 On Ubuntu 24.04, install `libc++-22-dev` and `libc++abi-22-dev` from
 [LLVM's APT repository](https://apt.llvm.org/), plus `libxml2-dev` from Ubuntu.
 
-Set `ZIG` to select a non-default Zig executable. Set `GPUI_NVIM` or assign
-`NvimOptions::executable` to select Neovim.
+Set `ZIG` to select a non-default Zig executable.
 
 ## Terminal
 
 ```toml
 [dependencies]
-gpui-libghostty = "0.3"
+gpui-libghostty = "0.4"
 ```
 
 ```rust,ignore
@@ -111,30 +105,12 @@ options.clipboard_approval = Some(Arc::new(|request| {
 }));
 ```
 
-`NvimOptions::clipboard_approval` exposes the same policy for embedded Neovim.
+## Example
 
-## Neovim
-
-```rust,ignore
-use gpui_neovim::NvimOptions;
-
-gpui_neovim::bind_gpui!(gpui);
-
-let editor = NvimEditor::spawn(
-    NvimOptions::new(project_directory, initial_file),
-    window,
-    cx,
-)?;
-let editor = cx.new(|_| editor);
-```
-
-Call and await `NvimEditor::open_file` through the entity to reuse the running
-Neovim instance.
-
-Run the standalone example from this repository:
+Run the standalone Neovim example from this repository:
 
 ```sh
-cargo run -p gpui-neovim --example neovim -- README.md
+cargo run --bin neovim -- README.md
 ```
 
 The optional argument is a file or directory. The example uses your Neovim
@@ -150,12 +126,11 @@ cargo test --workspace --locked
 
 ## GPUI compatibility
 
-Neither library depends on GPUI. `bind_gpui!` uses your application's GPUI crate
-or module path, including renamed packages such as `gpui-pre`.
+This library does not depend on GPUI. `bind_gpui!` uses your application's GPUI
+crate or module path, including renamed packages such as `gpui-pre`.
 
-Replace the old `Terminal` / `NvimEditor` imports with the bindings shown above.
-Invoke the binding once at module scope, outside `fn main()`, and share the
-generated types across your app. The Neovim binding also defines `Terminal`.
+Invoke `gpui_libghostty::bind_gpui!(gpui)` once at module scope, outside
+`fn main()`, and share the generated `Terminal` type across your app.
 
 Checks cover the workspace's Zed revision and `gpui-pre` 0.3.4. GPUI API changes
 may require an adapter update; arbitrary revisions are not guaranteed.

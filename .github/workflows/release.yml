@@ -4,7 +4,6 @@ on:
   push:
     tags:
       - "gpui-libghostty-v*"
-      - "gpui-neovim-v*"
 
 permissions:
   contents: read
@@ -34,7 +33,7 @@ jobs:
           crate="${TAG%-v*}"
           version="${TAG##*-v}"
           case "$crate" in
-            gpui-libghostty|gpui-neovim) ;;
+            gpui-libghostty) ;;
             *) echo "Unsupported release tag: $TAG" >&2; exit 1 ;;
           esac
           manifest_version="$(cargo metadata --no-deps --format-version 1 | python3 -c '
@@ -50,7 +49,6 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Bundle pinned Ghostty source
-        if: steps.release.outputs.crate == 'gpui-libghostty'
         run: |
           cargo run --locked -p xtask -- prepare-ghostty
           bash .github/scripts/check-release-tree.sh
@@ -67,8 +65,4 @@ jobs:
         # Native builds and tests must pass on both platforms in `checks` first.
         run: |
           bash .github/scripts/check-release-tree.sh
-          if [[ "${{ steps.release.outputs.crate }}" == gpui-libghostty ]]; then
-            cargo publish --locked --no-verify --allow-dirty --package gpui-libghostty
-          else
-            cargo publish --locked --no-verify --package "${{ steps.release.outputs.crate }}"
-          fi
+          cargo publish --locked --no-verify --allow-dirty --package gpui-libghostty

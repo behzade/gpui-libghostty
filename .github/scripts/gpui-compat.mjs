@@ -64,7 +64,6 @@ publish = false
 [dependencies]
 chosen-ui = { ${dependency}, default-features = false }
 terminal-library = { package = "gpui-libghostty", path = "../../../crates/gpui-ghostty" }
-editor-library = { package = "gpui-neovim", path = "../../../crates/gpui-neovim" }
 
 [lints.rust]
 unsafe_code = "forbid"

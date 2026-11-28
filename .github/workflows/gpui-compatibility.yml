@@ -65,7 +65,7 @@ jobs:
         run: bash .github/scripts/install-linux-deps.sh
       - name: Resolve dependencies
         run: cargo generate-lockfile --manifest-path "$CONSUMER/Cargo.toml"
-      - name: Test both components against resolved GPUI
+      - name: Test gpui-libghostty against resolved GPUI
         run: cargo test --locked --manifest-path "$CONSUMER/Cargo.toml"
       - name: Save reproduction files
         if: always()
